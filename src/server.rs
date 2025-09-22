@@ -1,14 +1,12 @@
-
-# src/server.rs
 use crate::config::Config;
 use crate::disk_manager::{DiskManager, StorageInfo};
 use crate::recorder::{Recorder, RecordingStats};
 use axum::{
+    Router,
     extract::State,
     http::StatusCode,
     response::Json,
     routing::{get, post},
-    Router,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -150,4 +148,3 @@ async fn stop_recording(State(state): State<AppState>) -> Result<String, StatusC
 
     Ok("Recording stopped".to_string())
 }
-

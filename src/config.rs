@@ -1,5 +1,3 @@
-
-# src/config.rs
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::env;
@@ -47,10 +45,10 @@ impl Config {
 
         // Override with environment variables (12-factor principle)
         config.load_from_env();
-        
+
         // Ensure output directory exists
         std::fs::create_dir_all(&config.output_dir)?;
-        
+
         Ok(config)
     }
 
@@ -89,4 +87,3 @@ impl Config {
         }
     }
 }
-

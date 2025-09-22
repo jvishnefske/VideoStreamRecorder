@@ -1,4 +1,3 @@
-# src/recorder.rs
 use crate::config::Config;
 use crate::disk_manager::DiskManager;
 use crate::error::RecorderError;
@@ -7,8 +6,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ffmpeg_next as ffmpeg;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
@@ -54,7 +53,7 @@ impl VideoRecorder {
 
     async fn record_stream(&self) -> Result<(), RecorderError> {
         let mut retry_count = 0;
-        
+
         while self.is_recording.load(Ordering::Relaxed) && retry_count < self.config.max_retries {
             match self.record_stream_once().await {
                 Ok(_) => {
@@ -63,20 +62,26 @@ impl VideoRecorder {
                 }
                 Err(e) => {
                     retry_count += 1;
-                    error!("Recording failed (attempt {}/{}): {}", retry_count, self.config.max_retries, e);
-                    
+                    error!(
+                        "Recording failed (attempt {}/{}): {}",
+                        retry_count, self.config.max_retries, e
+                    );
+
                     if retry_count < self.config.max_retries {
                         warn!("Retrying in {} seconds...", self.config.retry_delay);
-                        tokio::time::sleep(tokio::time::Duration::from_secs(self.config.retry_delay)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_secs(
+                            self.config.retry_delay,
+                        ))
+                        .await;
                     }
                 }
             }
         }
-        
+
         if retry_count >= self.config.max_retries {
             error!("Max retries exceeded, stopping recording");
         }
-        
+
         Ok(())
     }
 
@@ -87,7 +92,7 @@ impl VideoRecorder {
         }
 
         info!("Connecting to stream: {}", self.config.stream_url);
-        
+
         // Open input stream
         let mut input = ffmpeg::format::input(&self.config.stream_url)?;
         let video_stream_index = input
@@ -98,15 +103,17 @@ impl VideoRecorder {
 
         let video_stream = input.stream(video_stream_index).unwrap();
         let video_codec_parameters = video_stream.parameters();
-        
-        info!("Video stream found - codec: {:?}, {}x{}", 
-              video_codec_parameters.id(),
-              video_codec_parameters.width(),
-              video_codec_parameters.height());
+
+        info!(
+            "Video stream found - codec: {:?}, {}x{}",
+            video_codec_parameters.id(),
+            video_codec_parameters.width(),
+            video_codec_parameters.height()
+        );
 
         let mut segment_index = 0;
         let start_time = Utc::now();
-        
+
         // Update stats
         {
             let mut stats = self.stats.write().await;
@@ -115,50 +122,55 @@ impl VideoRecorder {
 
         while self.is_recording.load(Ordering::Relaxed) {
             let segment_path = self.generate_segment_path(segment_index);
-            
+
             info!("Recording segment: {:?}", segment_path);
-            
+
             // Create output for this segment
             let mut output = ffmpeg::format::output(&segment_path)?;
-            
+
             // Add video stream to output
-            let mut out_stream = output.add_stream(ffmpeg::encoder::find(ffmpeg::codec::Id::H264))?;
+            let mut out_stream =
+                output.add_stream(ffmpeg::encoder::find(ffmpeg::codec::Id::H264))?;
             out_stream.set_parameters(&video_codec_parameters);
-            
+
             // Write header
             output.write_header()?;
-            
+
             let segment_start = std::time::Instant::now();
             let mut packet_count = 0;
-            
+
             // Record for segment duration
-            while self.is_recording.load(Ordering::Relaxed) 
-                && segment_start.elapsed().as_secs() < self.config.segment_duration as u64 {
-                
+            while self.is_recording.load(Ordering::Relaxed)
+                && segment_start.elapsed().as_secs() < self.config.segment_duration as u64
+            {
                 for (stream, mut packet) in input.packets() {
                     if stream.index() == video_stream_index {
                         packet.set_stream(0);
                         packet.write_interleaved(&mut output)?;
                         packet_count += 1;
-                        
+
                         // Check if segment duration reached
-                        if segment_start.elapsed().as_secs() >= self.config.segment_duration as u64 {
+                        if segment_start.elapsed().as_secs() >= self.config.segment_duration as u64
+                        {
                             break;
                         }
                     }
                 }
-                
+
                 // Prevent tight loop if no packets
                 if packet_count == 0 {
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 }
             }
-            
+
             // Write trailer for this segment
             output.write_trailer()?;
-            
-            info!("Completed segment {} with {} packets", segment_index, packet_count);
-            
+
+            info!(
+                "Completed segment {} with {} packets",
+                segment_index, packet_count
+            );
+
             // Update stats
             {
                 let mut stats = self.stats.write().await;
@@ -166,21 +178,21 @@ impl VideoRecorder {
                 stats.total_duration += self.config.segment_duration as u64;
                 stats.last_file = Some(segment_path);
             }
-            
+
             self.files_recorded.fetch_add(1, Ordering::Relaxed);
             segment_index += 1;
-            
+
             // Check disk space periodically
             if segment_index % 10 == 0 && !self.disk_manager.has_space().await? {
                 warn!("Disk space low, attempting cleanup");
                 self.disk_manager.cleanup_old_files().await?;
-                
+
                 if !self.disk_manager.has_space().await? {
                     return Err(RecorderError::DiskFull);
                 }
             }
         }
-        
+
         Ok(())
     }
 
@@ -194,12 +206,16 @@ impl VideoRecorder {
 #[async_trait]
 impl Recorder for VideoRecorder {
     async fn start(&self) -> Result<(), RecorderError> {
-        if self.is_recording.compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed).is_err() {
+        if self
+            .is_recording
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
             return Err(RecorderError::AlreadyRecording);
         }
-        
+
         info!("Starting video recording from: {}", self.config.stream_url);
-        
+
         let recorder = Arc::new(self.clone());
         tokio::spawn(async move {
             if let Err(e) = recorder.record_stream().await {
@@ -207,7 +223,7 @@ impl Recorder for VideoRecorder {
             }
             recorder.is_recording.store(false, Ordering::Relaxed);
         });
-        
+
         Ok(())
     }
 
@@ -215,13 +231,13 @@ impl Recorder for VideoRecorder {
         if !self.is_recording.load(Ordering::Relaxed) {
             return Err(RecorderError::NotRecording);
         }
-        
+
         info!("Stopping video recording");
         self.is_recording.store(false, Ordering::Relaxed);
-        
+
         // Wait a bit for graceful shutdown
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-        
+
         Ok(())
     }
 
@@ -245,4 +261,3 @@ impl Clone for VideoRecorder {
         }
     }
 }
-

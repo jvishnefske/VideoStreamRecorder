@@ -1,14 +1,12 @@
-
-# src/disk_manager.rs
 use crate::config::Config;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use fs2::available_space;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct StorageInfo {
@@ -62,7 +60,10 @@ impl DiskManager {
         let mut deleted_count = 0;
         let mut deleted_size = 0u64;
 
-        info!("Starting cleanup of old files in {:?}", self.config.output_dir);
+        info!(
+            "Starting cleanup of old files in {:?}",
+            self.config.output_dir
+        );
 
         let mut entries = tokio::fs::read_dir(&self.config.output_dir).await?;
         let mut files = Vec::new();
@@ -105,18 +106,21 @@ impl DiskManager {
 
         *self.last_cleanup.write().await = Some(Utc::now());
 
-        info!("Cleanup completed: {} files deleted, {} bytes freed", deleted_count, deleted_size);
+        info!(
+            "Cleanup completed: {} files deleted, {} bytes freed",
+            deleted_count, deleted_size
+        );
         Ok(deleted_size)
     }
 
     pub async fn start_monitoring(&self) {
-        let mut interval = tokio::time::interval(
-            tokio::time::Duration::from_secs(self.config.cleanup_check_interval)
-        );
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
+            self.config.cleanup_check_interval,
+        ));
 
         loop {
             interval.tick().await;
-            
+
             match self.has_space().await {
                 Ok(has_space) => {
                     if !has_space {
@@ -141,4 +145,3 @@ impl DiskManager {
         self.files_deleted.load(Ordering::Relaxed)
     }
 }
-

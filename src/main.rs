@@ -1,4 +1,3 @@
-# src/main.rs
 use anyhow::Result;
 use clap::Parser;
 use std::sync::Arc;
@@ -7,9 +6,9 @@ use tracing::{info, warn};
 
 mod config;
 mod disk_manager;
+mod error;
 mod recorder;
 mod server;
-mod error;
 
 use config::Config;
 use disk_manager::DiskManager;
@@ -33,7 +32,7 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
     let config = Config::load(args.config.as_deref())?;
-    
+
     info!("Starting video stream recorder with config: {:?}", config);
 
     // Initialize FFmpeg
@@ -42,7 +41,7 @@ async fn main() -> Result<()> {
     // Create shared components
     let disk_manager = Arc::new(DiskManager::new(config.clone()));
     let recorder = Arc::new(VideoRecorder::new(config.clone(), disk_manager.clone()));
-    
+
     // Start disk monitoring task
     let disk_task = {
         let disk_manager = disk_manager.clone();
@@ -53,9 +52,7 @@ async fn main() -> Result<()> {
 
     // Start web server
     let server = Server::new(config.clone(), recorder.clone(), disk_manager.clone());
-    let server_task = tokio::spawn(async move {
-        server.start().await
-    });
+    let server_task = tokio::spawn(async move { server.start().await });
 
     // Auto-start recording if configured
     if config.auto_start {
@@ -78,4 +75,3 @@ async fn main() -> Result<()> {
     info!("Application shut down gracefully");
     Ok(())
 }
-
