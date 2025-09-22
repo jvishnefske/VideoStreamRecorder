@@ -1,0 +1,29 @@
+i
+# docker-compose.yml
+version: '3.8'
+
+services:
+  video-recorder:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./recordings:/app/recordings
+      - ./config.json:/app/config.json:ro
+    environment:
+      - STREAM_URL=https://your-webcam-stream-url/stream.m3u8
+      - OUTPUT_DIR=/app/recordings
+      - SEGMENT_DURATION=10
+      - MAX_DISK_USAGE_PERCENT=90
+      - CLEANUP_CHECK_INTERVAL=60
+      - PORT=8080
+      - HOST=0.0.0.0
+      - AUTO_START=true
+      - RUST_LOG=info
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
