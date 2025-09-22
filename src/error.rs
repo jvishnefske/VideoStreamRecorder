@@ -22,4 +22,7 @@ pub enum RecorderError {
 
     #[error("Stream connection failed: {0}")]
     StreamConnection(String),
+
+    #[error("Anyhow error: {0}")]
+    Anyhow(#[from] anyhow::Error),
 }

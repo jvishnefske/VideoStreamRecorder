@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct RecordingStats {
     pub started_at: Option<DateTime<Utc>>,
     pub files_recorded: u64,
@@ -93,22 +93,36 @@ impl VideoRecorder {
 
         info!("Connecting to stream: {}", self.config.stream_url);
 
-        // Open input stream
-        let mut input = ffmpeg::format::input(&self.config.stream_url)?;
-        let video_stream_index = input
-            .streams()
-            .best(ffmpeg::media::Type::Video)
-            .ok_or_else(|| RecorderError::StreamConnection("No video stream found".to_string()))?
-            .index();
+        // Extract video information and drop non-Send types before async operations
+        let (video_stream_index, video_codec_parameters, video_width, video_height) = {
+            let input = ffmpeg::format::input(&self.config.stream_url)?;
+            let video_stream_index = input
+                .streams()
+                .best(ffmpeg::media::Type::Video)
+                .ok_or_else(|| {
+                    RecorderError::StreamConnection("No video stream found".to_string())
+                })?
+                .index();
 
-        let video_stream = input.stream(video_stream_index).unwrap();
-        let video_codec_parameters = video_stream.parameters();
+            let video_stream = input.stream(video_stream_index).unwrap();
+            let video_codec_parameters = video_stream.parameters();
+
+            // Create a decoder to get video dimensions
+            let context =
+                ffmpeg::codec::context::Context::from_parameters(video_codec_parameters.clone())?;
+            let decoder = context.decoder().video()?;
+
+            let width = decoder.width();
+            let height = decoder.height();
+
+            (video_stream_index, video_codec_parameters, width, height)
+        };
 
         info!(
             "Video stream found - codec: {:?}, {}x{}",
             video_codec_parameters.id(),
-            video_codec_parameters.width(),
-            video_codec_parameters.height()
+            video_width,
+            video_height
         );
 
         let mut segment_index = 0;
@@ -125,13 +139,18 @@ impl VideoRecorder {
 
             info!("Recording segment: {:?}", segment_path);
 
+            // Re-open input stream for this segment
+            let mut input = ffmpeg::format::input(&self.config.stream_url)?;
+
             // Create output for this segment
             let mut output = ffmpeg::format::output(&segment_path)?;
 
             // Add video stream to output
-            let mut out_stream =
-                output.add_stream(ffmpeg::encoder::find(ffmpeg::codec::Id::H264))?;
-            out_stream.set_parameters(&video_codec_parameters);
+            {
+                let mut out_stream =
+                    output.add_stream(ffmpeg::encoder::find(ffmpeg::codec::Id::H264))?;
+                out_stream.set_parameters(video_codec_parameters.clone());
+            }
 
             // Write header
             output.write_header()?;
@@ -159,7 +178,7 @@ impl VideoRecorder {
 
                 // Prevent tight loop if no packets
                 if packet_count == 0 {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    std::thread::sleep(std::time::Duration::from_millis(100));
                 }
             }
 
@@ -170,6 +189,10 @@ impl VideoRecorder {
                 "Completed segment {} with {} packets",
                 segment_index, packet_count
             );
+
+            // Drop FFmpeg contexts before async operations
+            drop(output);
+            drop(input);
 
             // Update stats
             {

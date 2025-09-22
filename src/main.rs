@@ -4,6 +4,8 @@ use std::sync::Arc;
 use tokio::signal;
 use tracing::{info, warn};
 
+use crate::recorder::Recorder;
+
 mod config;
 mod disk_manager;
 mod error;

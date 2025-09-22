@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct StorageInfo {
     pub total_space: u64,
     pub available_space: u64,
