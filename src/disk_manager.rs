@@ -118,13 +118,28 @@ impl DiskManager {
             self.config.cleanup_check_interval,
         ));
 
+        info!(
+            "Starting disk monitoring (check interval: {}s, max usage: {:.1}%)",
+            self.config.cleanup_check_interval, self.config.max_disk_usage_percent
+        );
+
         loop {
             interval.tick().await;
 
-            match self.has_space().await {
-                Ok(has_space) => {
-                    if !has_space {
-                        warn!("Disk usage exceeded threshold, starting cleanup");
+            match self.get_storage_info().await {
+                Ok(storage) => {
+                    // Log storage status periodically
+                    info!(
+                        "Storage check - {:.1}% used ({} GB available)",
+                        storage.usage_percent,
+                        storage.available_space / 1_000_000_000
+                    );
+
+                    if storage.usage_percent >= self.config.max_disk_usage_percent {
+                        warn!(
+                            "Disk usage exceeded threshold ({:.1}% >= {:.1}%), starting cleanup",
+                            storage.usage_percent, self.config.max_disk_usage_percent
+                        );
                         if let Err(e) = self.cleanup_old_files().await {
                             error!("Cleanup failed: {}", e);
                         }

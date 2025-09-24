@@ -11,12 +11,11 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tower::ServiceBuilder;
-use tower_http::trace::TraceLayer;
-use tracing::info;
+use tower_http::{trace::TraceLayer, services::ServeDir};
+use tracing::{error, info, trace};
 
 #[derive(Clone)]
 pub struct AppState {
-    pub config: Config,
     pub recorder: Arc<dyn Recorder + Send + Sync>,
     pub disk_manager: Arc<DiskManager>,
 }
@@ -40,7 +39,7 @@ pub struct MetricsResponse {
 
 #[derive(Deserialize)]
 pub struct StartRequest {
-    pub force: Option<bool>,
+    //pub force: Option<bool>,
 }
 
 pub struct Server {
@@ -64,16 +63,28 @@ impl Server {
 
     pub async fn start(self) -> Result<(), anyhow::Error> {
         let state = AppState {
-            config: self.config.clone(),
             recorder: self.recorder,
             disk_manager: self.disk_manager,
         };
 
+        // Get the frontend dist path from build script
+        let frontend_dist = if let Ok(dist_path) = std::env::var("FRONTEND_DIST_PATH") {
+            std::path::PathBuf::from(dist_path)
+        } else {
+            // Fallback to local development path
+            std::path::PathBuf::from("frontend/dist")
+        };
+
+        info!("Serving frontend from: {:?}", frontend_dist);
+
         let app = Router::new()
+            // API routes
             .route("/health", get(health_check))
             .route("/metrics", get(get_metrics))
             .route("/start", post(start_recording))
             .route("/stop", post(stop_recording))
+            // Static file serving (must be last)
+            .fallback_service(ServeDir::new(frontend_dist))
             .layer(ServiceBuilder::new().layer(TraceLayer::new_for_http()))
             .with_state(state);
 
@@ -92,26 +103,43 @@ async fn health_check(State(state): State<AppState>) -> Result<Json<HealthRespon
         .disk_manager
         .get_storage_info()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            error!("Failed to get storage info for health check: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let is_recording = state.recorder.is_recording().await;
 
     let response = HealthResponse {
         status: "healthy".to_string(),
         uptime: 0, // You'd implement actual uptime tracking
         timestamp: chrono::Utc::now().to_rfc3339(),
-        recording: state.recorder.is_recording().await,
-        storage,
+        recording: is_recording,
+        storage: storage.clone(),
     };
+
+    trace!(
+        "Health check - Recording: {}, Storage: {:.1}% used ({} GB available)",
+        is_recording,
+        storage.usage_percent,
+        storage.available_space / 1_000_000_000
+    );
 
     Ok(Json(response))
 }
 
 async fn get_metrics(State(state): State<AppState>) -> Result<Json<MetricsResponse>, StatusCode> {
+    info!("Metrics requested");
+
     let recording_stats = state.recorder.get_stats().await;
     let storage_info = state
         .disk_manager
         .get_storage_info()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            error!("Failed to get storage info for metrics: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
     let files_deleted = state.disk_manager.get_files_deleted();
     let last_cleanup = state
         .disk_manager
@@ -120,31 +148,49 @@ async fn get_metrics(State(state): State<AppState>) -> Result<Json<MetricsRespon
         .map(|dt| dt.to_rfc3339());
 
     let response = MetricsResponse {
-        recording_stats,
-        storage_info,
+        recording_stats: recording_stats.clone(),
+        storage_info: storage_info.clone(),
         files_deleted,
-        last_cleanup,
+        last_cleanup: last_cleanup.clone(),
     };
+
+    info!(
+        "Metrics - Files recorded: {}, Total duration: {}s, Files deleted: {}, Storage: {:.1}%",
+        recording_stats.files_recorded,
+        recording_stats.total_duration,
+        files_deleted,
+        storage_info.usage_percent
+    );
 
     Ok(Json(response))
 }
 
 async fn start_recording(State(state): State<AppState>) -> Result<String, StatusCode> {
-    state
-        .recorder
-        .start()
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    info!("Received request to start recording");
 
-    Ok("Recording started".to_string())
+    match state.recorder.start().await {
+        Ok(_) => {
+            info!("Recording started successfully via API");
+            Ok("Recording started".to_string())
+        }
+        Err(e) => {
+            error!("Failed to start recording via API: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
 }
 
 async fn stop_recording(State(state): State<AppState>) -> Result<String, StatusCode> {
-    state
-        .recorder
-        .stop()
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    info!("Received request to stop recording");
 
-    Ok("Recording stopped".to_string())
+    match state.recorder.stop().await {
+        Ok(_) => {
+            info!("Recording stopped successfully via API");
+            Ok("Recording stopped".to_string())
+        }
+        Err(e) => {
+            error!("Failed to stop recording via API: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
 }

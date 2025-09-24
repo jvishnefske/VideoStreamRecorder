@@ -88,10 +88,14 @@ impl VideoRecorder {
     async fn record_stream_once(&self) -> Result<(), RecorderError> {
         // Check disk space before starting
         if !self.disk_manager.has_space().await? {
+            error!("Insufficient disk space to start recording");
             return Err(RecorderError::DiskFull);
         }
 
-        info!("Connecting to stream: {}", self.config.stream_url);
+        info!(
+            "Connecting to stream: {} (segment duration: {}s)",
+            self.config.stream_url, self.config.segment_duration
+        );
 
         // Extract video information and drop non-Send types before async operations
         let (video_stream_index, video_codec_parameters, video_width, video_height) = {
@@ -127,6 +131,7 @@ impl VideoRecorder {
 
         let mut segment_index = 0;
         let start_time = Utc::now();
+        let recording_start = std::time::Instant::now();
 
         // Update stats
         {
@@ -185,9 +190,13 @@ impl VideoRecorder {
             // Write trailer for this segment
             output.write_trailer()?;
 
+            let segment_duration_actual = segment_start.elapsed().as_secs();
             info!(
-                "Completed segment {} with {} packets",
-                segment_index, packet_count
+                "Completed segment {} with {} packets (duration: {}s, size: {:?})",
+                segment_index,
+                packet_count,
+                segment_duration_actual,
+                std::fs::metadata(&segment_path).map(|m| m.len()).unwrap_or(0)
             );
 
             // Drop FFmpeg contexts before async operations
@@ -205,13 +214,26 @@ impl VideoRecorder {
             self.files_recorded.fetch_add(1, Ordering::Relaxed);
             segment_index += 1;
 
-            // Check disk space periodically
-            if segment_index % 10 == 0 && !self.disk_manager.has_space().await? {
-                warn!("Disk space low, attempting cleanup");
-                self.disk_manager.cleanup_old_files().await?;
+            // Check disk space and log status periodically
+            if segment_index % 10 == 0 {
+                let storage = self.disk_manager.get_storage_info().await?;
+                let elapsed = recording_start.elapsed().as_secs();
+                info!(
+                    "Recording status - Segment: {}, Runtime: {}s, Files: {}, Storage: {:.1}% used",
+                    segment_index,
+                    elapsed,
+                    self.files_recorded.load(Ordering::Relaxed),
+                    storage.usage_percent
+                );
 
                 if !self.disk_manager.has_space().await? {
-                    return Err(RecorderError::DiskFull);
+                    warn!("Disk space low, attempting cleanup");
+                    self.disk_manager.cleanup_old_files().await?;
+
+                    if !self.disk_manager.has_space().await? {
+                        error!("Insufficient disk space after cleanup, stopping recording");
+                        return Err(RecorderError::DiskFull);
+                    }
                 }
             }
         }

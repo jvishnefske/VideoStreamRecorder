@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Stream Recorder</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Video Stream Recorder</h1>
+            <div class="status-indicator" id="statusIndicator">
+                <span class="status-dot" id="statusDot"></span>
+                <span id="statusText">Loading...</span>
+            </div>
+        </header>
+
+        <main>
+            <section class="controls">
+                <button id="startBtn" class="btn btn-primary" disabled>Start Recording</button>
+                <button id="stopBtn" class="btn btn-secondary" disabled>Stop Recording</button>
+                <button id="refreshBtn" class="btn btn-info">Refresh Status</button>
+            </section>
+
+            <section class="metrics">
+                <div class="metric-grid">
+                    <div class="metric-card">
+                        <h3>Recording Status</h3>
+                        <div class="metric-value" id="recordingStatus">-</div>
+                    </div>
+                    <div class="metric-card">
+                        <h3>Files Recorded</h3>
+                        <div class="metric-value" id="filesRecorded">-</div>
+                    </div>
+                    <div class="metric-card">
+                        <h3>Total Duration</h3>
+                        <div class="metric-value" id="totalDuration">-</div>
+                    </div>
+                    <div class="metric-card">
+                        <h3>Storage Used</h3>
+                        <div class="metric-value" id="storageUsed">-</div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="storage">
+                <h3>Storage Information</h3>
+                <div class="storage-bar">
+                    <div class="storage-fill" id="storageFill"></div>
+                    <span class="storage-text" id="storageText">0% used</span>
+                </div>
+                <div class="storage-details">
+                    <span>Available: <span id="availableSpace">-</span></span>
+                    <span>Total: <span id="totalSpace">-</span></span>
+                    <span>Files Deleted: <span id="filesDeleted">-</span></span>
+                </div>
+            </section>
+
+            <section class="logs">
+                <h3>Activity Log</h3>
+                <div class="log-container" id="logContainer">
+                    <div class="log-entry">System initialized</div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script type="module" src="index.js"></script>
+</body>
+</html>
