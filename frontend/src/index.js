@@ -157,7 +157,11 @@ class VideoStreamRecorderApp {
         this.recordingStatus.textContent = isRecording ? 'Recording' : 'Idle';
 
         // Update status indicator
-        this.statusDot.className = `status-dot ${isRecording ? 'recording' : 'idle'}`;
+        if (isRecording) {
+            this.statusDot.className = 'w-3 h-3 rounded-full bg-secondary-500 animate-pulse-dot transition-colors duration-300';
+        } else {
+            this.statusDot.className = 'w-3 h-3 rounded-full bg-primary-500 transition-colors duration-300';
+        }
         this.statusText.textContent = isRecording ? 'Recording' : 'Ready';
 
         // Update buttons
@@ -198,12 +202,13 @@ class VideoStreamRecorderApp {
         this.totalSpace.textContent = this.formatBytes(storage.total_space);
 
         // Change storage bar color based on usage
+        this.storageFill.className = this.storageFill.className.replace(/storage-fill-\w+/, '');
         if (usagePercent > 90) {
-            this.storageFill.style.background = '#e74c3c';
+            this.storageFill.classList.add('storage-fill-high');
         } else if (usagePercent > 75) {
-            this.storageFill.style.background = 'linear-gradient(90deg, #f39c12, #e74c3c)';
+            this.storageFill.classList.add('storage-fill-medium');
         } else {
-            this.storageFill.style.background = 'linear-gradient(90deg, #27ae60, #f39c12)';
+            this.storageFill.classList.add('storage-fill-low');
         }
     }
 
@@ -212,7 +217,7 @@ class VideoStreamRecorderApp {
             this.statusText.textContent = this.statusText.textContent || 'Ready';
             this.refreshBtn.disabled = false;
         } else {
-            this.statusDot.className = 'status-dot error';
+            this.statusDot.className = 'w-3 h-3 rounded-full bg-error transition-colors duration-300';
             this.statusText.textContent = 'Connection Error';
             this.startBtn.disabled = true;
             this.stopBtn.disabled = true;
@@ -223,7 +228,13 @@ class VideoStreamRecorderApp {
     addLog(message, type = 'info') {
         const timestamp = new Date().toLocaleTimeString();
         const logEntry = document.createElement('div');
-        logEntry.className = `log-entry ${type}`;
+
+        let colorClass = 'text-neutral-800';
+        if (type === 'success') colorClass = 'text-primary-500';
+        else if (type === 'error') colorClass = 'text-secondary-500';
+        else if (type === 'warning') colorClass = 'text-warning';
+
+        logEntry.className = `py-1 border-b border-gray-200 last:border-b-0 ${colorClass}`;
         logEntry.textContent = `[${timestamp}] ${message}`;
 
         this.logContainer.appendChild(logEntry);

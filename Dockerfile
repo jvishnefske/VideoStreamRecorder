@@ -1,6 +1,6 @@
 
 # Dockerfile
-FROM rust:1.75 as builder
+FROM rust:1-bookworm AS builder
 
 # Install FFmpeg development libraries
 RUN apt-get update && apt-get install -y \
