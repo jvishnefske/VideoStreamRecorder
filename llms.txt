@@ -1,0 +1,133 @@
+# LLMs
+
+This file provides guidance to Language Models when working with code in this repository.
+
+## Build and Development Commands
+
+### Rust Backend
+```bash
+# Build (automatically builds frontend via build.rs)
+cargo build
+
+# Run in development mode
+cargo run
+
+# Check without building
+cargo check
+
+# Run with config file
+cargo run -- -c config.json
+
+# Development with logs
+RUST_LOG=debug cargo run
+
+# Cross-compilation skips frontend build automatically
+```
+
+### Frontend
+```bash
+# Development server with hot reload
+npm run dev
+
+# Production build
+npm run build
+
+# Clean build artifacts
+npm run clean
+```
+
+### Testing
+```bash
+# Run all tests
+cargo test
+
+# Run tests with output
+cargo test -- --nocapture
+
+# Run specific test
+cargo test test_name
+
+# Frontend has no tests currently - uses browser testing
+```
+
+## Architecture Overview
+
+### Multi-Stream Video Recording System
+This is a 12-factor Rust application that records multiple HTTPS webcam streams simultaneously into H.264 video segments with automatic storage management.
+
+### Core Components Architecture
+
+**Config System (`src/config.rs`)**:
+- `Config` struct manages both legacy single-stream and new multi-stream configurations
+- `StreamConfig` defines individual stream parameters (id, url, enabled, output_subdir)
+- Environment variable support: `STREAM_IDS` + `STREAM_URL_{ID}` pattern
+- Backward compatibility via `migrate_legacy_config()` method
+- Stream-specific output directories via `get_stream_output_dir()`
+
+**Recording Architecture (`src/recorder.rs`)**:
+- `Recorder` trait provides unified interface for single/multi-stream operations
+- `MultiStreamRecorder` (aliased as `VideoRecorder`) manages multiple `SingleStreamRecorder` instances
+- Uses `Arc<RwLock<HashMap<String, Arc<SingleStreamRecorder>>>>` for thread-safe stream management
+- Each `SingleStreamRecorder` handles one stream with independent retry logic and statistics
+- Exponential backoff retry: immediate first retry, then 1s, 2s, 4s, 8s... capped at `retry_delay`
+- FFmpeg integration for direct H.264 transcoding without re-encoding
+
+**Storage Management (`src/disk_manager.rs` + `src/disk_manager_ext.rs`)**:
+- `DiskManager` handles global cleanup across all stream directories
+- Enhanced cleanup scans both main output dir and per-stream subdirectories
+- `StreamStorageInfo` provides per-stream storage statistics
+- Automatic old file deletion when disk usage exceeds `max_disk_usage_percent`
+
+**HTTP Server (`src/server.rs`)**:
+- Axum-based REST API with both legacy and multi-stream endpoints
+- Legacy: `/start`, `/stop`, `/health`, `/metrics` (backward compatible)
+- Multi-stream: `/streams`, `/streams/{id}/start`, `/streams/{id}/stop`, `/streams/{id}/stats`
+- Serves static frontend from `frontend/dist` via fallback handler
+- Uses `Arc<dyn Recorder + Send + Sync>` for thread-safe access to recording functionality
+
+**Frontend (`frontend/src/index.js`)**:
+- RxJS-based reactive UI with automatic polling every 5 seconds
+- Currently single-stream focused (legacy UI) - multi-stream dashboard pending
+- Real-time status updates, metrics display, storage monitoring
+- Uses observables for button clicks, health checks, and metrics updates
+
+### Integrated Build System
+The `build.rs` script automatically builds the frontend during Rust compilation:
+- Detects changes in `package.json` and `frontend/src/**`
+- Runs `npm install` and `npm run build` as needed
+- Copies built assets to Rust's `OUT_DIR` for embedding
+- Skips frontend build during cross-compilation or docs builds
+
+### Configuration Patterns
+
+**Environment Variable Hierarchy**:
+1. Single stream (legacy): `STREAM_URL="https://camera.com/stream"`
+2. Multi-stream: `STREAM_IDS="cam1,cam2"` + `STREAM_URL_CAM1="url1"` + `STREAM_URL_CAM2="url2"`
+3. Per-stream options: `STREAM_ENABLED_{ID}`, `STREAM_SUBDIR_{ID}`
+
+**Stream Directory Structure**:
+```
+output_dir/
+├── stream_id1/          # Default: uses stream ID
+├── custom_subdir/       # Custom: via output_subdir config
+└── segment_*.mp4        # Legacy: files in root (backward compatibility)
+```
+
+### Error Handling Patterns
+- `RecorderError` enum in `src/error.rs` covers FFmpeg, IO, HTTP, and domain-specific errors
+- Infinite retry by default (`max_retries: 0`) with exponential backoff
+- Graceful degradation: individual stream failures don't affect other streams
+- Storage-aware recording: stops on disk full, resumes after cleanup
+
+### Key Design Decisions
+- **Backward Compatibility**: Legacy single-stream API and config still work
+- **Zero Re-encoding**: Direct H.264 stream copy via FFmpeg for performance
+- **Per-Stream Isolation**: Independent retry logic, statistics, and storage per stream
+- **12-Factor Compliance**: All configuration via environment variables
+- **Production Ready**: Docker support, health checks, graceful shutdown, storage management
+
+### Development Notes
+- FFmpeg binding requires system FFmpeg development libraries
+- Frontend build integrated into Rust build process for seamless deployment
+- Use `cargo check` for faster iteration without frontend rebuild
+- Multi-stream functionality implemented but frontend dashboard still pending update

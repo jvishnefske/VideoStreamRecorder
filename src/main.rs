@@ -8,6 +8,7 @@ use crate::recorder::Recorder;
 
 mod config;
 mod disk_manager;
+mod disk_manager_ext;
 mod error;
 mod recorder;
 mod server;
@@ -46,6 +47,9 @@ async fn main() -> Result<()> {
     // Create shared components
     let disk_manager = Arc::new(DiskManager::new(config.clone()));
     let recorder = Arc::new(VideoRecorder::new(config.clone(), disk_manager.clone()));
+
+    // Initialize stream recorders for multi-stream support
+    recorder.initialize_streams().await;
 
     // Start disk monitoring task
     let disk_task = {

@@ -1,0 +1,28 @@
+{
+  "streams": [
+    {
+      "id": "test_stream_1",
+      "url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
+      "enabled": true,
+      "output_subdir": "stream1"
+    },
+    {
+      "id": "test_stream_2",
+      "url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4",
+      "enabled": true,
+      "output_subdir": "stream2"
+    }
+  ],
+  "output_dir": "./test_recordings",
+  "segment_duration": 10,
+  "max_disk_usage_percent": 95.0,
+  "cleanup_check_interval": 60,
+  "server_port": 8080,
+  "server_host": "127.0.0.1",
+  "auto_start": false,
+  "max_retries": 3,
+  "retry_delay": 5,
+  "ffmpeg_analyzeduration": 10000000,
+  "ffmpeg_probesize": 10000000,
+  "rtsp_transport": "tcp"
+}

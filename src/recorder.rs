@@ -1,14 +1,17 @@
-use crate::config::Config;
+use crate::config::{Config, StreamConfig};
 use crate::disk_manager::DiskManager;
 use crate::error::RecorderError;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ffmpeg_next as ffmpeg;
+use ffmpeg_next::Dictionary;
 use std::path::PathBuf;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Mutex};
+use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -19,25 +22,80 @@ pub struct RecordingStats {
     pub last_file: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StreamStats {
+    pub stream_id: String,
+    pub stream_url: String,
+    pub is_recording: bool,
+    pub stats: RecordingStats,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MultiStreamStats {
+    pub streams: Vec<StreamStats>,
+    pub total_files_recorded: u64,
+    pub active_streams: u64,
+}
+
 #[async_trait]
 pub trait Recorder {
+    // Legacy single-stream methods (for backward compatibility)
     async fn start(&self) -> Result<(), RecorderError>;
     async fn stop(&self) -> Result<(), RecorderError>;
     async fn is_recording(&self) -> bool;
     async fn get_stats(&self) -> RecordingStats;
+
+    // New multi-stream methods
+    async fn start_stream(&self, stream_id: &str) -> Result<(), RecorderError>;
+    async fn stop_stream(&self, stream_id: &str) -> Result<(), RecorderError>;
+    async fn is_stream_recording(&self, stream_id: &str) -> bool;
+    async fn get_stream_stats(&self, stream_id: &str) -> Option<StreamStats>;
+    async fn get_multi_stream_stats(&self) -> MultiStreamStats;
+    async fn list_streams(&self) -> Vec<String>;
 }
 
-pub struct VideoRecorder {
+// Single stream recorder (kept for internal use)
+struct SingleStreamRecorder {
+    stream_id: String,
+    stream_url: String,
     config: Config,
     disk_manager: Arc<DiskManager>,
     is_recording: AtomicBool,
     stats: Arc<RwLock<RecordingStats>>,
     files_recorded: AtomicU64,
+    task_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
-impl VideoRecorder {
-    pub fn new(config: Config, disk_manager: Arc<DiskManager>) -> Self {
+// Multi-stream recorder that manages multiple single stream recorders
+pub struct MultiStreamRecorder {
+    config: Config,
+    disk_manager: Arc<DiskManager>,
+    stream_recorders: Arc<RwLock<HashMap<String, Arc<SingleStreamRecorder>>>>,
+}
+
+// Legacy alias for backward compatibility
+pub type VideoRecorder = MultiStreamRecorder;
+
+impl Clone for SingleStreamRecorder {
+    fn clone(&self) -> Self {
         Self {
+            stream_id: self.stream_id.clone(),
+            stream_url: self.stream_url.clone(),
+            config: self.config.clone(),
+            disk_manager: self.disk_manager.clone(),
+            is_recording: AtomicBool::new(self.is_recording.load(Ordering::Relaxed)),
+            stats: self.stats.clone(),
+            files_recorded: AtomicU64::new(self.files_recorded.load(Ordering::Relaxed)),
+            task_handle: Arc::new(Mutex::new(None)), // New task handle for cloned instance
+        }
+    }
+}
+
+impl SingleStreamRecorder {
+    fn new(stream_config: StreamConfig, config: Config, disk_manager: Arc<DiskManager>) -> Self {
+        Self {
+            stream_id: stream_config.id.clone(),
+            stream_url: stream_config.url.clone(),
             config,
             disk_manager,
             is_recording: AtomicBool::new(false),
@@ -48,38 +106,133 @@ impl VideoRecorder {
                 last_file: None,
             })),
             files_recorded: AtomicU64::new(0),
+            task_handle: Arc::new(Mutex::new(None)),
         }
+    }
+
+    fn create_input_options(&self) -> Dictionary {
+        let mut options = Dictionary::new();
+
+        // Set analyzeduration (in microseconds)
+        options.set("analyzeduration", &self.config.ffmpeg_analyzeduration.to_string());
+
+        // Set probesize (in bytes)
+        options.set("probesize", &self.config.ffmpeg_probesize.to_string());
+
+        // Set RTSP transport protocol for RTSP URLs
+        if self.stream_url.starts_with("rtsp://") {
+            options.set("rtsp_transport", &self.config.rtsp_transport);
+        }
+
+        info!(
+            "Using FFmpeg options for stream {}: analyzeduration={}μs, probesize={} bytes, rtsp_transport={}",
+            self.stream_id,
+            self.config.ffmpeg_analyzeduration,
+            self.config.ffmpeg_probesize,
+            self.config.rtsp_transport
+        );
+
+        options
+    }
+
+    async fn start_recording(&self) -> Result<(), RecorderError> {
+        if self
+            .is_recording
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return Err(RecorderError::AlreadyRecording);
+        }
+
+        info!("Starting stream recording: {} ({})", self.stream_id, self.stream_url);
+
+        let recorder = Arc::new(self.clone());
+        let handle = tokio::spawn(async move {
+            if let Err(e) = recorder.record_stream().await {
+                error!("Recording failed for stream {}: {}", recorder.stream_id, e);
+            }
+            recorder.is_recording.store(false, Ordering::Relaxed);
+        });
+
+        *self.task_handle.lock().await = Some(handle);
+        Ok(())
+    }
+
+    async fn stop_recording(&self) -> Result<(), RecorderError> {
+        if !self.is_recording.load(Ordering::Relaxed) {
+            return Err(RecorderError::NotRecording);
+        }
+
+        info!("Stopping stream recording: {}", self.stream_id);
+
+        // Signal the recording task to stop gracefully
+        self.is_recording.store(false, Ordering::Relaxed);
+
+        // Wait for the recording task to complete gracefully
+        if let Some(handle) = self.task_handle.lock().await.take() {
+            // Use join instead of abort to allow graceful shutdown
+            match tokio::time::timeout(tokio::time::Duration::from_secs(5), handle).await {
+                Ok(_) => {
+                    info!("Stream {} stopped gracefully", self.stream_id);
+                }
+                Err(_) => {
+                    warn!("Stream {} did not stop within timeout, may have been forcefully terminated", self.stream_id);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     async fn record_stream(&self) -> Result<(), RecorderError> {
         let mut retry_count = 0;
 
-        while self.is_recording.load(Ordering::Relaxed) && retry_count < self.config.max_retries {
+        while self.is_recording.load(Ordering::Relaxed) && (self.config.max_retries == 0 || retry_count < self.config.max_retries) {
             match self.record_stream_once().await {
                 Ok(_) => {
-                    info!("Stream recording completed normally");
+                    info!("Stream recording completed normally for: {}", self.stream_id);
                     break;
                 }
                 Err(e) => {
                     retry_count += 1;
-                    error!(
-                        "Recording failed (attempt {}/{}): {}",
-                        retry_count, self.config.max_retries, e
-                    );
 
-                    if retry_count < self.config.max_retries {
-                        warn!("Retrying in {} seconds...", self.config.retry_delay);
-                        tokio::time::sleep(tokio::time::Duration::from_secs(
-                            self.config.retry_delay,
-                        ))
-                        .await;
+                    if self.config.max_retries == 0 {
+                        error!(
+                            "Recording failed for stream {} (attempt {}, infinite retries): {}",
+                            self.stream_id, retry_count, e
+                        );
+                    } else {
+                        error!(
+                            "Recording failed for stream {} (attempt {}/{}): {}",
+                            self.stream_id, retry_count, self.config.max_retries, e
+                        );
+                    }
+
+                    // Continue to retry if we haven't exceeded max_retries (or infinite retries)
+                    if self.config.max_retries == 0 || retry_count < self.config.max_retries {
+                        // Calculate exponential backoff delay
+                        let delay_seconds = if retry_count == 1 {
+                            // First retry is immediate (0 seconds)
+                            0
+                        } else {
+                            // Exponential backoff: 1, 2, 4, 8, ... up to retry_delay max
+                            let exponential_delay = 1u64 << (retry_count - 2).min(6); // Cap at 2^6 = 64 seconds
+                            exponential_delay.min(self.config.retry_delay)
+                        };
+
+                        if delay_seconds == 0 {
+                            info!("Retrying stream {} immediately...", self.stream_id);
+                        } else {
+                            warn!("Retrying stream {} in {} seconds...", self.stream_id, delay_seconds);
+                            tokio::time::sleep(tokio::time::Duration::from_secs(delay_seconds)).await;
+                        }
                     }
                 }
             }
         }
 
-        if retry_count >= self.config.max_retries {
-            error!("Max retries exceeded, stopping recording");
+        if self.config.max_retries > 0 && retry_count >= self.config.max_retries {
+            error!("Max retries ({}) exceeded for stream {}, stopping recording", self.config.max_retries, self.stream_id);
         }
 
         Ok(())
@@ -88,23 +241,40 @@ impl VideoRecorder {
     async fn record_stream_once(&self) -> Result<(), RecorderError> {
         // Check disk space before starting
         if !self.disk_manager.has_space().await? {
-            error!("Insufficient disk space to start recording");
+            error!("Insufficient disk space to start recording for stream: {}", self.stream_id);
             return Err(RecorderError::DiskFull);
         }
 
         info!(
-            "Connecting to stream: {} (segment duration: {}s)",
-            self.config.stream_url, self.config.segment_duration
+            "Connecting to stream: {} ({}, segment duration: {}s)",
+            self.stream_id, self.stream_url, self.config.segment_duration
         );
 
         // Extract video information and drop non-Send types before async operations
         let (video_stream_index, video_codec_parameters, video_width, video_height) = {
-            let input = ffmpeg::format::input(&self.config.stream_url)?;
+            let options = self.create_input_options();
+            let input = ffmpeg::format::input_with_dictionary(&self.stream_url, options)
+                .map_err(|e| {
+                    error!(
+                        "Failed to open stream {} with FFmpeg options: {}. \
+                        Try adjusting FFMPEG_ANALYZEDURATION (currently {}μs) or FFMPEG_PROBESIZE (currently {} bytes)",
+                        self.stream_url, e, self.config.ffmpeg_analyzeduration, self.config.ffmpeg_probesize
+                    );
+                    RecorderError::StreamConnection(format!(
+                        "Cannot connect to stream {}: {}. This may be due to codec parameter detection issues with HEVC/H.265 streams. \
+                        Consider increasing FFMPEG_ANALYZEDURATION (>10000000μs) or FFMPEG_PROBESIZE (>10000000 bytes) environment variables.",
+                        self.stream_url, e
+                    ))
+                })?;
+
             let video_stream_index = input
                 .streams()
                 .best(ffmpeg::media::Type::Video)
                 .ok_or_else(|| {
-                    RecorderError::StreamConnection("No video stream found".to_string())
+                    RecorderError::StreamConnection(format!(
+                        "No video stream found in {}. The stream may not contain video data or may be using an unsupported format.",
+                        self.stream_url
+                    ))
                 })?
                 .index();
 
@@ -112,18 +282,46 @@ impl VideoRecorder {
             let video_codec_parameters = video_stream.parameters();
 
             // Create a decoder to get video dimensions
-            let context =
-                ffmpeg::codec::context::Context::from_parameters(video_codec_parameters.clone())?;
-            let decoder = context.decoder().video()?;
+            let context = ffmpeg::codec::context::Context::from_parameters(video_codec_parameters.clone())
+                .map_err(|e| {
+                    error!(
+                        "Failed to create codec context for stream {}: {}. \
+                        This often happens with HEVC streams that need longer analysis time.",
+                        self.stream_url, e
+                    );
+                    RecorderError::StreamConnection(format!(
+                        "Codec parameter detection failed for stream {}: {}. \
+                        For HEVC/H.265 streams, try: FFMPEG_ANALYZEDURATION=20000000 FFMPEG_PROBESIZE=20000000",
+                        self.stream_url, e
+                    ))
+                })?;
+
+            let decoder = context.decoder().video()
+                .map_err(|e| {
+                    error!("Failed to create video decoder for stream {}: {}", self.stream_url, e);
+                    RecorderError::StreamConnection(format!(
+                        "Video decoder creation failed for {}: {}. The codec may not be supported or the stream parameters are invalid.",
+                        self.stream_url, e
+                    ))
+                })?;
 
             let width = decoder.width();
             let height = decoder.height();
+
+            if width == 0 || height == 0 {
+                return Err(RecorderError::StreamConnection(format!(
+                    "Stream {} has unspecified dimensions ({}x{}). \
+                    This is common with HEVC streams. Try: FFMPEG_ANALYZEDURATION=30000000 FFMPEG_PROBESIZE=30000000 RTSP_TRANSPORT=tcp",
+                    self.stream_url, width, height
+                )));
+            }
 
             (video_stream_index, video_codec_parameters, width, height)
         };
 
         info!(
-            "Video stream found - codec: {:?}, {}x{}",
+            "Video stream found for {} - codec: {:?}, {}x{}",
+            self.stream_id,
             video_codec_parameters.id(),
             video_width,
             video_height
@@ -142,12 +340,13 @@ impl VideoRecorder {
         while self.is_recording.load(Ordering::Relaxed) {
             let segment_path = self.generate_segment_path(segment_index);
 
-            info!("Recording segment: {:?}", segment_path);
+            info!("Recording segment for stream {}: {:?}", self.stream_id, segment_path);
 
             // Re-open input stream for this segment
-            let mut input = ffmpeg::format::input(&self.config.stream_url)?;
+            let options = self.create_input_options();
+            let mut input = ffmpeg::format::input_with_dictionary(&self.stream_url, options)?;
 
-            // Create output for this segment
+            // Create output for this segment with options to handle timestamp issues
             let mut output = ffmpeg::format::output(&segment_path)?;
 
             // Add video stream to output
@@ -163,15 +362,28 @@ impl VideoRecorder {
             let segment_start = std::time::Instant::now();
             let mut packet_count = 0;
 
-            // Record for segment duration
+            // Record for segment duration with more frequent cancellation checks
+            let mut last_packet_time = std::time::Instant::now();
             while self.is_recording.load(Ordering::Relaxed)
                 && segment_start.elapsed().as_secs() < self.config.segment_duration as u64
             {
+                let mut packets_processed_this_iteration = 0;
+                let iteration_start = std::time::Instant::now();
+
+                // Process packets with timeout to avoid blocking indefinitely
                 for (stream, mut packet) in input.packets() {
+                    // Check for cancellation frequently during packet processing
+                    if !self.is_recording.load(Ordering::Relaxed) {
+                        info!("Stream {} cancelled during packet processing", self.stream_id);
+                        return Ok(());
+                    }
+
                     if stream.index() == video_stream_index {
                         packet.set_stream(0);
                         packet.write_interleaved(&mut output)?;
                         packet_count += 1;
+                        packets_processed_this_iteration += 1;
+                        last_packet_time = std::time::Instant::now();
 
                         // Check if segment duration reached
                         if segment_start.elapsed().as_secs() >= self.config.segment_duration as u64
@@ -179,12 +391,31 @@ impl VideoRecorder {
                             break;
                         }
                     }
+
+                    // Break out of packet iterator if we've been processing for too long
+                    // This ensures we check cancellation flag regularly
+                    if iteration_start.elapsed().as_millis() > 500 {
+                        break;
+                    }
                 }
 
-                // Prevent tight loop if no packets
-                if packet_count == 0 {
-                    std::thread::sleep(std::time::Duration::from_millis(100));
+                // If no packets for a while and we're trying to cancel, break out
+                if packets_processed_this_iteration == 0 && last_packet_time.elapsed().as_millis() > 1000 {
+                    if !self.is_recording.load(Ordering::Relaxed) {
+                        info!("Stream {} no packets received and cancellation requested", self.stream_id);
+                        return Ok(());
+                    }
+                    // Small sleep to prevent tight loop when no packets
+                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                 }
+            }
+
+            // Check for cancellation before finalizing segment
+            if !self.is_recording.load(Ordering::Relaxed) {
+                info!("Stream {} cancelled before finalizing segment", self.stream_id);
+                // Still write trailer to avoid corrupted file
+                output.write_trailer()?;
+                return Ok(());
             }
 
             // Write trailer for this segment
@@ -192,8 +423,9 @@ impl VideoRecorder {
 
             let segment_duration_actual = segment_start.elapsed().as_secs();
             info!(
-                "Completed segment {} with {} packets (duration: {}s, size: {:?})",
+                "Completed segment {} for stream {} with {} packets (duration: {}s, size: {:?})",
                 segment_index,
+                self.stream_id,
                 packet_count,
                 segment_duration_actual,
                 std::fs::metadata(&segment_path).map(|m| m.len()).unwrap_or(0)
@@ -219,7 +451,8 @@ impl VideoRecorder {
                 let storage = self.disk_manager.get_storage_info().await?;
                 let elapsed = recording_start.elapsed().as_secs();
                 info!(
-                    "Recording status - Segment: {}, Runtime: {}s, Files: {}, Storage: {:.1}% used",
+                    "Recording status for stream {} - Segment: {}, Runtime: {}s, Files: {}, Storage: {:.1}% used",
+                    self.stream_id,
                     segment_index,
                     elapsed,
                     self.files_recorded.load(Ordering::Relaxed),
@@ -227,11 +460,11 @@ impl VideoRecorder {
                 );
 
                 if !self.disk_manager.has_space().await? {
-                    warn!("Disk space low, attempting cleanup");
+                    warn!("Disk space low for stream {}, attempting cleanup", self.stream_id);
                     self.disk_manager.cleanup_old_files().await?;
 
                     if !self.disk_manager.has_space().await? {
-                        error!("Insufficient disk space after cleanup, stopping recording");
+                        error!("Insufficient disk space after cleanup, stopping stream: {}", self.stream_id);
                         return Err(RecorderError::DiskFull);
                     }
                 }
@@ -243,55 +476,286 @@ impl VideoRecorder {
 
     fn generate_segment_path(&self, index: u32) -> PathBuf {
         let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
-        let filename = format!("segment_{}_{:06}.mp4", timestamp, index);
-        self.config.output_dir.join(filename)
+        let filename = format!("segment_{}_{}_{:06}.mp4", self.stream_id, timestamp, index);
+        self.config.get_stream_output_dir(&self.stream_id).join(filename)
     }
 }
+
+impl MultiStreamRecorder {
+    pub fn new(config: Config, disk_manager: Arc<DiskManager>) -> Self {
+        Self {
+            config,
+            disk_manager,
+            stream_recorders: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    pub async fn initialize_streams(&self) {
+        let mut map = self.stream_recorders.write().await;
+        for stream in &self.config.streams {
+            if stream.enabled {
+                let stream_recorder = Arc::new(SingleStreamRecorder::new(
+                    stream.clone(),
+                    self.config.clone(),
+                    self.disk_manager.clone(),
+                ));
+                map.insert(stream.id.clone(), stream_recorder);
+            }
+        }
+
+        // After initializing streams, scan for existing recordings
+        drop(map); // Release the write lock before calling scan_existing_recordings
+        self.scan_existing_recordings().await;
+    }
+
+    /// Scan existing recording directories and update statistics
+    pub async fn scan_existing_recordings(&self) {
+        info!("Scanning for existing recording files...");
+
+        let recorders = self.stream_recorders.read().await;
+        let mut total_existing_files = 0;
+        let mut total_existing_duration = 0;
+
+        for (stream_id, recorder) in recorders.iter() {
+            let stream_dir = self.config.get_stream_output_dir(stream_id);
+
+            if stream_dir.exists() {
+                match self.scan_stream_directory(&stream_dir, stream_id).await {
+                    Ok((files_count, total_duration)) => {
+                        // Update the stream's statistics
+                        recorder.files_recorded.store(files_count as u64, Ordering::Relaxed);
+
+                        // Update the stats with existing recordings info
+                        {
+                            let mut stats = recorder.stats.write().await;
+                            stats.total_duration = total_duration;
+                            // Don't set started_at for existing files
+                        }
+
+                        total_existing_files += files_count;
+                        total_existing_duration += total_duration;
+
+                        info!(
+                            "Found {} existing recording files for stream {} (total duration: {}s)",
+                            files_count, stream_id, total_duration
+                        );
+                    }
+                    Err(e) => {
+                        warn!("Failed to scan directory {:?} for stream {}: {}", stream_dir, stream_id, e);
+                    }
+                }
+            } else {
+                info!("No existing recording directory for stream {}", stream_id);
+            }
+        }
+
+        if total_existing_files > 0 {
+            info!(
+                "Startup scan complete: Found {} existing recording files across all streams (total duration: {}s)",
+                total_existing_files, total_existing_duration
+            );
+        } else {
+            info!("Startup scan complete: No existing recordings found");
+        }
+    }
+
+    /// Scan a specific stream directory for existing recording files
+    async fn scan_stream_directory(&self, stream_dir: &std::path::Path, stream_id: &str) -> Result<(usize, u64), std::io::Error> {
+        let mut files_count = 0;
+        let mut total_duration = 0;
+
+        let entries = std::fs::read_dir(stream_dir)?;
+
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+
+            // Check if it's a video file (mp4)
+            if let Some(extension) = path.extension() {
+                if extension == "mp4" {
+                    files_count += 1;
+
+                    // Try to extract duration from filename or file metadata
+                    if let Some(duration) = self.extract_duration_from_filename(&path, stream_id) {
+                        total_duration += duration;
+                    } else {
+                        // Default segment duration if we can't parse the filename
+                        total_duration += self.config.segment_duration as u64;
+                    }
+                }
+            }
+        }
+
+        Ok((files_count, total_duration))
+    }
+
+    /// Extract duration from segment filename if possible
+    fn extract_duration_from_filename(&self, _path: &std::path::Path, _stream_id: &str) -> Option<u64> {
+        // Our segments are named like: segment_STREAMID_20250924_161814_000000.mp4
+        // For now, assume each segment is the configured segment duration
+        // In the future, we could parse actual file metadata or use FFmpeg to get real duration
+        Some(self.config.segment_duration as u64)
+    }
+}
+
 
 #[async_trait]
 impl Recorder for VideoRecorder {
     async fn start(&self) -> Result<(), RecorderError> {
-        if self
-            .is_recording
-            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-            .is_err()
-        {
-            return Err(RecorderError::AlreadyRecording);
+        // For backward compatibility, start all enabled streams
+        info!("Starting video recording for all enabled streams");
+
+        let mut started_any = false;
+        for stream in self.config.get_enabled_streams() {
+            match self.start_stream(&stream.id).await {
+                Ok(_) => {
+                    info!("Started stream: {}", stream.id);
+                    started_any = true;
+                }
+                Err(e) => {
+                    error!("Failed to start stream {}: {}", stream.id, e);
+                }
+            }
         }
 
-        info!("Starting video recording from: {}", self.config.stream_url);
-
-        let recorder = Arc::new(self.clone());
-        tokio::spawn(async move {
-            if let Err(e) = recorder.record_stream().await {
-                error!("Recording failed: {}", e);
-            }
-            recorder.is_recording.store(false, Ordering::Relaxed);
-        });
+        if !started_any {
+            return Err(RecorderError::StreamConnection("No streams could be started".to_string()));
+        }
 
         Ok(())
     }
 
     async fn stop(&self) -> Result<(), RecorderError> {
-        if !self.is_recording.load(Ordering::Relaxed) {
-            return Err(RecorderError::NotRecording);
+        // For backward compatibility, stop all recording streams
+        info!("Stopping video recording for all streams");
+
+        let mut stopped_any = false;
+        let recorders = self.stream_recorders.read().await;
+        for (stream_id, recorder) in recorders.iter() {
+            if recorder.is_recording.load(Ordering::Relaxed) {
+                match recorder.stop_recording().await {
+                    Ok(_) => {
+                        info!("Stopped stream: {}", stream_id);
+                        stopped_any = true;
+                    }
+                    Err(e) => {
+                        error!("Failed to stop stream {}: {}", stream_id, e);
+                    }
+                }
+            }
         }
 
-        info!("Stopping video recording");
-        self.is_recording.store(false, Ordering::Relaxed);
-
-        // Wait a bit for graceful shutdown
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        if !stopped_any {
+            return Err(RecorderError::NotRecording);
+        }
 
         Ok(())
     }
 
     async fn is_recording(&self) -> bool {
-        self.is_recording.load(Ordering::Relaxed)
+        // For backward compatibility, return true if any stream is recording
+        let recorders = self.stream_recorders.read().await;
+        for recorder in recorders.values() {
+            if recorder.is_recording.load(Ordering::Relaxed) {
+                return true;
+            }
+        }
+        false
     }
 
     async fn get_stats(&self) -> RecordingStats {
-        self.stats.read().await.clone()
+        // For backward compatibility, return stats from first enabled stream
+        if let Some(first_stream) = self.config.get_enabled_streams().first() {
+            if let Some(stats) = self.get_stream_stats(&first_stream.id).await {
+                return stats.stats;
+            }
+        }
+
+        // Fallback to empty stats
+        RecordingStats {
+            started_at: None,
+            files_recorded: 0,
+            total_duration: 0,
+            last_file: None,
+        }
+    }
+
+    // New multi-stream methods
+    async fn start_stream(&self, stream_id: &str) -> Result<(), RecorderError> {
+        let recorders = self.stream_recorders.read().await;
+        if let Some(recorder) = recorders.get(stream_id) {
+            recorder.start_recording().await
+        } else {
+            Err(RecorderError::StreamConnection(format!("Stream not found: {}", stream_id)))
+        }
+    }
+
+    async fn stop_stream(&self, stream_id: &str) -> Result<(), RecorderError> {
+        let recorders = self.stream_recorders.read().await;
+        if let Some(recorder) = recorders.get(stream_id) {
+            recorder.stop_recording().await
+        } else {
+            Err(RecorderError::StreamConnection(format!("Stream not found: {}", stream_id)))
+        }
+    }
+
+    async fn is_stream_recording(&self, stream_id: &str) -> bool {
+        let recorders = self.stream_recorders.read().await;
+        if let Some(recorder) = recorders.get(stream_id) {
+            recorder.is_recording.load(Ordering::Relaxed)
+        } else {
+            false
+        }
+    }
+
+    async fn get_stream_stats(&self, stream_id: &str) -> Option<StreamStats> {
+        let recorders = self.stream_recorders.read().await;
+        if let Some(recorder) = recorders.get(stream_id) {
+            let stats = recorder.stats.read().await.clone();
+            Some(StreamStats {
+                stream_id: stream_id.to_string(),
+                stream_url: recorder.stream_url.clone(),
+                is_recording: recorder.is_recording.load(Ordering::Relaxed),
+                stats,
+            })
+        } else {
+            None
+        }
+    }
+
+    async fn get_multi_stream_stats(&self) -> MultiStreamStats {
+        let recorders = self.stream_recorders.read().await;
+        let mut streams = Vec::new();
+        let mut total_files_recorded = 0;
+        let mut active_streams = 0;
+
+        for (stream_id, recorder) in recorders.iter() {
+            let stats = recorder.stats.read().await.clone();
+            let is_recording = recorder.is_recording.load(Ordering::Relaxed);
+
+            total_files_recorded += stats.files_recorded;
+            if is_recording {
+                active_streams += 1;
+            }
+
+            streams.push(StreamStats {
+                stream_id: stream_id.clone(),
+                stream_url: recorder.stream_url.clone(),
+                is_recording,
+                stats,
+            });
+        }
+
+        MultiStreamStats {
+            streams,
+            total_files_recorded,
+            active_streams,
+        }
+    }
+
+    async fn list_streams(&self) -> Vec<String> {
+        let recorders = self.stream_recorders.read().await;
+        recorders.keys().cloned().collect()
     }
 }
 
@@ -300,9 +764,7 @@ impl Clone for VideoRecorder {
         Self {
             config: self.config.clone(),
             disk_manager: self.disk_manager.clone(),
-            is_recording: AtomicBool::new(self.is_recording.load(Ordering::Relaxed)),
-            stats: self.stats.clone(),
-            files_recorded: AtomicU64::new(self.files_recorded.load(Ordering::Relaxed)),
+            stream_recorders: self.stream_recorders.clone(),
         }
     }
 }

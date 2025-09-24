@@ -1,9 +1,9 @@
 use crate::config::Config;
 use crate::disk_manager::{DiskManager, StorageInfo};
-use crate::recorder::{Recorder, RecordingStats};
+use crate::recorder::{Recorder, RecordingStats, StreamStats, MultiStreamStats};
 use axum::{
     Router,
-    extract::State,
+    extract::{State, Path},
     http::StatusCode,
     response::Json,
     routing::{get, post},
@@ -35,6 +35,19 @@ pub struct MetricsResponse {
     pub storage_info: StorageInfo,
     pub files_deleted: u64,
     pub last_cleanup: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct MultiStreamMetricsResponse {
+    pub multi_stream_stats: MultiStreamStats,
+    pub storage_info: StorageInfo,
+    pub files_deleted: u64,
+    pub last_cleanup: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct StreamListResponse {
+    pub streams: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -78,11 +91,18 @@ impl Server {
         info!("Serving frontend from: {:?}", frontend_dist);
 
         let app = Router::new()
-            // API routes
+            // Legacy API routes (for backward compatibility)
             .route("/health", get(health_check))
             .route("/metrics", get(get_metrics))
             .route("/start", post(start_recording))
             .route("/stop", post(stop_recording))
+            // New multi-stream API routes
+            .route("/streams", get(list_streams))
+            .route("/streams/metrics", get(get_multi_stream_metrics))
+            .route("/streams/:stream_id/start", post(start_stream_recording))
+            .route("/streams/:stream_id/stop", post(stop_stream_recording))
+            .route("/streams/:stream_id/stats", get(get_stream_stats))
+            .route("/streams/:stream_id/status", get(get_stream_status))
             // Static file serving (must be last)
             .fallback_service(ServeDir::new(frontend_dist))
             .layer(ServiceBuilder::new().layer(TraceLayer::new_for_http()))
@@ -193,4 +213,103 @@ async fn stop_recording(State(state): State<AppState>) -> Result<String, StatusC
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
+}
+
+// New multi-stream API endpoints
+
+async fn list_streams(State(state): State<AppState>) -> Result<Json<StreamListResponse>, StatusCode> {
+    info!("Received request to list streams");
+
+    let streams = state.recorder.list_streams().await;
+    Ok(Json(StreamListResponse { streams }))
+}
+
+async fn get_multi_stream_metrics(State(state): State<AppState>) -> Result<Json<MultiStreamMetricsResponse>, StatusCode> {
+    info!("Multi-stream metrics requested");
+
+    let multi_stream_stats = state.recorder.get_multi_stream_stats().await;
+    let storage_info = state
+        .disk_manager
+        .get_storage_info()
+        .await
+        .map_err(|e| {
+            error!("Failed to get storage info for multi-stream metrics: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    let files_deleted = state.disk_manager.get_files_deleted();
+    let last_cleanup = state
+        .disk_manager
+        .get_last_cleanup()
+        .await
+        .map(|dt| dt.to_rfc3339());
+
+    let response = MultiStreamMetricsResponse {
+        multi_stream_stats,
+        storage_info,
+        files_deleted,
+        last_cleanup,
+    };
+
+    Ok(Json(response))
+}
+
+async fn start_stream_recording(
+    Path(stream_id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<String, StatusCode> {
+    info!("Received request to start recording for stream: {}", stream_id);
+
+    match state.recorder.start_stream(&stream_id).await {
+        Ok(_) => {
+            info!("Recording started successfully for stream: {}", stream_id);
+            Ok(format!("Recording started for stream: {}", stream_id))
+        }
+        Err(e) => {
+            error!("Failed to start recording for stream {}: {}", stream_id, e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn stop_stream_recording(
+    Path(stream_id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<String, StatusCode> {
+    info!("Received request to stop recording for stream: {}", stream_id);
+
+    match state.recorder.stop_stream(&stream_id).await {
+        Ok(_) => {
+            info!("Recording stopped successfully for stream: {}", stream_id);
+            Ok(format!("Recording stopped for stream: {}", stream_id))
+        }
+        Err(e) => {
+            error!("Failed to stop recording for stream {}: {}", stream_id, e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn get_stream_stats(
+    Path(stream_id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<Json<Option<StreamStats>>, StatusCode> {
+    info!("Received request for stats for stream: {}", stream_id);
+
+    let stats = state.recorder.get_stream_stats(&stream_id).await;
+    Ok(Json(stats))
+}
+
+async fn get_stream_status(
+    Path(stream_id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    info!("Received request for status of stream: {}", stream_id);
+
+    let is_recording = state.recorder.is_stream_recording(&stream_id).await;
+    let response = serde_json::json!({
+        "stream_id": stream_id,
+        "is_recording": is_recording
+    });
+
+    Ok(Json(response))
 }

@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Video Stream Recorder</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
+    <link rel="apple-touch-icon" href="favicon.svg">
     <link rel="stylesheet" href="styles.css">
 </head>
 <body class="bg-gray-100 text-gray-900 leading-relaxed font-sans">
@@ -18,9 +20,16 @@
 
         <main>
             <section class="bg-white p-5 rounded-lg shadow-sm mb-5 flex gap-3 flex-wrap flex-col md:flex-row">
-                <button id="startBtn" class="px-6 py-3 border-none rounded-md text-base font-medium cursor-pointer transition-all duration-200 uppercase tracking-wider text-white bg-primary-500 hover:bg-primary-600 hover:-translate-y-px disabled:opacity-60 disabled:cursor-not-allowed disabled:transform-none flex-1 md:flex-initial" disabled>Start Recording</button>
-                <button id="stopBtn" class="px-6 py-3 border-none rounded-md text-base font-medium cursor-pointer transition-all duration-200 uppercase tracking-wider text-white bg-secondary-500 hover:bg-secondary-600 hover:-translate-y-px disabled:opacity-60 disabled:cursor-not-allowed disabled:transform-none flex-1 md:flex-initial" disabled>Stop Recording</button>
+                <button id="startBtn" class="px-6 py-3 border-none rounded-md text-base font-medium cursor-pointer transition-all duration-200 uppercase tracking-wider text-white bg-primary-500 hover:bg-primary-600 hover:-translate-y-px disabled:opacity-60 disabled:cursor-not-allowed disabled:transform-none flex-1 md:flex-initial" disabled>Start All Streams</button>
+                <button id="stopBtn" class="px-6 py-3 border-none rounded-md text-base font-medium cursor-pointer transition-all duration-200 uppercase tracking-wider text-white bg-secondary-500 hover:bg-secondary-600 hover:-translate-y-px disabled:opacity-60 disabled:cursor-not-allowed disabled:transform-none flex-1 md:flex-initial" disabled>Stop All Streams</button>
                 <button id="refreshBtn" class="px-6 py-3 border-none rounded-md text-base font-medium cursor-pointer transition-all duration-200 uppercase tracking-wider text-white bg-info-500 hover:bg-info-600 hover:-translate-y-px flex-1 md:flex-initial">Refresh Status</button>
+            </section>
+
+            <section class="bg-white p-5 rounded-lg shadow-sm mb-5" id="streamManagement" style="display: none;">
+                <h3 class="mb-4 text-neutral-700 text-lg font-medium">Stream Management</h3>
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" id="streamContainer">
+                    <!-- Stream cards will be dynamically populated here -->
+                </div>
             </section>
 
             <section class="mb-5">
@@ -53,7 +62,7 @@
                 <div class="flex justify-between text-sm text-neutral-500 flex-wrap gap-2 flex-col md:flex-row">
                     <span>Available: <span id="availableSpace">-</span></span>
                     <span>Total: <span id="totalSpace">-</span></span>
-                    <span>Files Deleted: <span id="filesDeleted">-</span></span>
+                    <span>File Cache Eviction Count: <span id="filesDeleted">-</span></span>
                 </div>
             </section>
 

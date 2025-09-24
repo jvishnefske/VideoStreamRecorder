@@ -61,29 +61,30 @@ impl DiskManager {
         let mut deleted_size = 0u64;
 
         info!(
-            "Starting cleanup of old files in {:?}",
+            "Starting cleanup of old files in {:?} and stream subdirectories",
             self.config.output_dir
         );
 
-        let mut entries = tokio::fs::read_dir(&self.config.output_dir).await?;
+        // Collect files from main directory and all stream subdirectories
         let mut files = Vec::new();
 
-        while let Some(entry) = entries.next_entry().await? {
-            if let Ok(metadata) = entry.metadata().await {
-                if metadata.is_file() {
-                    if let Some(path_str) = entry.path().to_str() {
-                        if path_str.ends_with(".mp4") {
-                            if let Ok(created) = metadata.created() {
-                                files.push((entry.path(), created, metadata.len()));
-                            }
-                        }
-                    }
+        // Add files from main output directory
+        self.collect_mp4_files(&self.config.output_dir, &mut files).await?;
+
+        // Add files from each stream's output directory
+        for stream in &self.config.streams {
+            if stream.enabled {
+                let stream_dir = self.config.get_stream_output_dir(&stream.id);
+                if stream_dir.exists() {
+                    self.collect_mp4_files(&stream_dir, &mut files).await?;
                 }
             }
         }
 
         // Sort by creation time (oldest first)
         files.sort_by_key(|(_, created, _)| *created);
+
+        info!("Found {} video files across all directories for potential cleanup", files.len());
 
         // Delete oldest files until we have enough space
         for (file_path, _, size) in files {
@@ -111,6 +112,28 @@ impl DiskManager {
             deleted_count, deleted_size
         );
         Ok(deleted_size)
+    }
+
+    async fn collect_mp4_files(&self, dir: &Path, files: &mut Vec<(std::path::PathBuf, std::time::SystemTime, u64)>) -> Result<()> {
+        let mut entries = tokio::fs::read_dir(dir).await?;
+
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+
+            if let Ok(metadata) = entry.metadata().await {
+                if metadata.is_file() {
+                    if let Some(path_str) = path.to_str() {
+                        if path_str.ends_with(".mp4") {
+                            if let Ok(created) = metadata.created() {
+                                files.push((path, created, metadata.len()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     pub async fn start_monitoring(&self) {
@@ -158,5 +181,10 @@ impl DiskManager {
 
     pub fn get_files_deleted(&self) -> u64 {
         self.files_deleted.load(Ordering::Relaxed)
+    }
+
+    /// Get the configuration for use in extension modules
+    pub fn get_config(&self) -> &Config {
+        &self.config
     }
 }
