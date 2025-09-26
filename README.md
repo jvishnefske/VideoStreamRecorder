@@ -34,7 +34,7 @@ curl -X POST http://localhost:8080/streams/back_yard/start
 - **💾 Smart Storage Management** - Never run out of disk space with intelligent cleanup
 - **📈 Multiple Streams** - Record unlimited simultaneous streams with individual control
 - **🛠️ 12-Factor Compliant** - Configure everything via environment variables
-- **🐳 Production Ready** - Docker support, health checks, metrics, graceful shutdown
+- **🐳 Production features** - Docker support, health checks, metrics, graceful shutdown
 - **⚡ High Performance** - Rust-powered with direct FFmpeg integration, no re-encoding
 
 ## 📊 Perfect For
@@ -42,7 +42,7 @@ curl -X POST http://localhost:8080/streams/back_yard/start
 - **Security Camera Systems** - Reliable 24/7 recording with automatic failover
 - **Live Stream Archival** - Never miss a moment of important broadcasts
 - **IoT Camera Networks** - Centralized recording from multiple edge devices
-- **Compliance Recording** - Automated retention with storage management
+- **Rolling Recording storage** - Automated retention with storage management
 - **Development Testing** - Record and replay video streams for debugging
 
 ## 🎛️ Web Dashboard
