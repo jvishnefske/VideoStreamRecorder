@@ -768,3 +768,291 @@ impl Clone for VideoRecorder {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_recording_stats_default_values() {
+        let stats = RecordingStats {
+            started_at: None,
+            files_recorded: 0,
+            total_duration: 0,
+            last_file: None,
+        };
+
+        assert!(stats.started_at.is_none());
+        assert_eq!(stats.files_recorded, 0);
+        assert_eq!(stats.total_duration, 0);
+        assert!(stats.last_file.is_none());
+    }
+
+    #[test]
+    fn test_recording_stats_with_values() {
+        let now = Utc::now();
+        let stats = RecordingStats {
+            started_at: Some(now),
+            files_recorded: 42,
+            total_duration: 3600,
+            last_file: Some(PathBuf::from("/recordings/segment_001.mp4")),
+        };
+
+        assert_eq!(stats.started_at, Some(now));
+        assert_eq!(stats.files_recorded, 42);
+        assert_eq!(stats.total_duration, 3600);
+        assert_eq!(stats.last_file, Some(PathBuf::from("/recordings/segment_001.mp4")));
+    }
+
+    #[test]
+    fn test_recording_stats_clone() {
+        let stats = RecordingStats {
+            started_at: Some(Utc::now()),
+            files_recorded: 10,
+            total_duration: 100,
+            last_file: Some(PathBuf::from("/test.mp4")),
+        };
+
+        let cloned = stats.clone();
+
+        assert_eq!(cloned.started_at, stats.started_at);
+        assert_eq!(cloned.files_recorded, stats.files_recorded);
+        assert_eq!(cloned.total_duration, stats.total_duration);
+        assert_eq!(cloned.last_file, stats.last_file);
+    }
+
+    #[test]
+    fn test_recording_stats_serialization() {
+        let stats = RecordingStats {
+            started_at: None,
+            files_recorded: 5,
+            total_duration: 50,
+            last_file: None,
+        };
+
+        let json = serde_json::to_string(&stats).unwrap();
+
+        assert!(json.contains("\"files_recorded\":5"));
+        assert!(json.contains("\"total_duration\":50"));
+        assert!(json.contains("\"started_at\":null"));
+        assert!(json.contains("\"last_file\":null"));
+    }
+
+    #[test]
+    fn test_stream_stats_creation() {
+        let stats = StreamStats {
+            stream_id: "cam1".to_string(),
+            stream_url: "rtsp://example.com/stream".to_string(),
+            is_recording: true,
+            stats: RecordingStats {
+                started_at: None,
+                files_recorded: 20,
+                total_duration: 200,
+                last_file: None,
+            },
+        };
+
+        assert_eq!(stats.stream_id, "cam1");
+        assert_eq!(stats.stream_url, "rtsp://example.com/stream");
+        assert!(stats.is_recording);
+        assert_eq!(stats.stats.files_recorded, 20);
+    }
+
+    #[test]
+    fn test_stream_stats_clone() {
+        let stats = StreamStats {
+            stream_id: "test".to_string(),
+            stream_url: "rtsp://test.com".to_string(),
+            is_recording: false,
+            stats: RecordingStats {
+                started_at: None,
+                files_recorded: 0,
+                total_duration: 0,
+                last_file: None,
+            },
+        };
+
+        let cloned = stats.clone();
+
+        assert_eq!(cloned.stream_id, stats.stream_id);
+        assert_eq!(cloned.stream_url, stats.stream_url);
+        assert_eq!(cloned.is_recording, stats.is_recording);
+    }
+
+    #[test]
+    fn test_stream_stats_serialization() {
+        let stats = StreamStats {
+            stream_id: "cam2".to_string(),
+            stream_url: "rtsp://example.com/cam2".to_string(),
+            is_recording: true,
+            stats: RecordingStats {
+                started_at: None,
+                files_recorded: 15,
+                total_duration: 150,
+                last_file: Some(PathBuf::from("/recordings/test.mp4")),
+            },
+        };
+
+        let json = serde_json::to_string(&stats).unwrap();
+
+        assert!(json.contains("\"stream_id\":\"cam2\""));
+        assert!(json.contains("\"stream_url\":\"rtsp://example.com/cam2\""));
+        assert!(json.contains("\"is_recording\":true"));
+        assert!(json.contains("\"files_recorded\":15"));
+    }
+
+    #[test]
+    fn test_multi_stream_stats_creation() {
+        let stats = MultiStreamStats {
+            streams: vec![
+                StreamStats {
+                    stream_id: "cam1".to_string(),
+                    stream_url: "rtsp://example.com/1".to_string(),
+                    is_recording: true,
+                    stats: RecordingStats {
+                        started_at: None,
+                        files_recorded: 10,
+                        total_duration: 100,
+                        last_file: None,
+                    },
+                },
+                StreamStats {
+                    stream_id: "cam2".to_string(),
+                    stream_url: "rtsp://example.com/2".to_string(),
+                    is_recording: false,
+                    stats: RecordingStats {
+                        started_at: None,
+                        files_recorded: 5,
+                        total_duration: 50,
+                        last_file: None,
+                    },
+                },
+            ],
+            total_files_recorded: 15,
+            active_streams: 1,
+        };
+
+        assert_eq!(stats.streams.len(), 2);
+        assert_eq!(stats.total_files_recorded, 15);
+        assert_eq!(stats.active_streams, 1);
+    }
+
+    #[test]
+    fn test_multi_stream_stats_clone() {
+        let stats = MultiStreamStats {
+            streams: vec![],
+            total_files_recorded: 100,
+            active_streams: 3,
+        };
+
+        let cloned = stats.clone();
+
+        assert_eq!(cloned.streams.len(), stats.streams.len());
+        assert_eq!(cloned.total_files_recorded, stats.total_files_recorded);
+        assert_eq!(cloned.active_streams, stats.active_streams);
+    }
+
+    #[test]
+    fn test_multi_stream_stats_serialization() {
+        let stats = MultiStreamStats {
+            streams: vec![],
+            total_files_recorded: 50,
+            active_streams: 2,
+        };
+
+        let json = serde_json::to_string(&stats).unwrap();
+
+        assert!(json.contains("\"streams\":[]"));
+        assert!(json.contains("\"total_files_recorded\":50"));
+        assert!(json.contains("\"active_streams\":2"));
+    }
+
+    #[test]
+    fn test_multi_stream_recorder_new() {
+        let config = Config::default();
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+
+        let recorder = MultiStreamRecorder::new(config.clone(), disk_manager);
+
+        assert_eq!(recorder.config.segment_duration, config.segment_duration);
+    }
+
+    #[tokio::test]
+    async fn test_multi_stream_recorder_list_streams_empty() {
+        let config = Config::default();
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = MultiStreamRecorder::new(config, disk_manager);
+
+        let streams = recorder.list_streams().await;
+
+        assert!(streams.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_multi_stream_recorder_is_recording_when_empty() {
+        let config = Config::default();
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = MultiStreamRecorder::new(config, disk_manager);
+
+        assert!(!recorder.is_recording().await);
+    }
+
+    #[tokio::test]
+    async fn test_multi_stream_recorder_get_stats_when_empty() {
+        let config = Config::default();
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = MultiStreamRecorder::new(config, disk_manager);
+
+        let stats = recorder.get_stats().await;
+
+        assert!(stats.started_at.is_none());
+        assert_eq!(stats.files_recorded, 0);
+        assert_eq!(stats.total_duration, 0);
+        assert!(stats.last_file.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_multi_stream_recorder_get_stream_stats_not_found() {
+        let config = Config::default();
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = MultiStreamRecorder::new(config, disk_manager);
+
+        let stats = recorder.get_stream_stats("nonexistent").await;
+
+        assert!(stats.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_multi_stream_recorder_is_stream_recording_not_found() {
+        let config = Config::default();
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = MultiStreamRecorder::new(config, disk_manager);
+
+        assert!(!recorder.is_stream_recording("nonexistent").await);
+    }
+
+    #[tokio::test]
+    async fn test_multi_stream_recorder_get_multi_stream_stats_empty() {
+        let config = Config::default();
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = MultiStreamRecorder::new(config, disk_manager);
+
+        let stats = recorder.get_multi_stream_stats().await;
+
+        assert!(stats.streams.is_empty());
+        assert_eq!(stats.total_files_recorded, 0);
+        assert_eq!(stats.active_streams, 0);
+    }
+
+    #[test]
+    fn test_video_recorder_clone() {
+        let config = Config::default();
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = VideoRecorder::new(config.clone(), disk_manager);
+
+        let cloned = recorder.clone();
+
+        assert_eq!(cloned.config.segment_duration, recorder.config.segment_duration);
+    }
+}

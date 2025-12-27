@@ -223,3 +223,227 @@ impl Config {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_config_values() {
+        let config = Config::default();
+
+        assert_eq!(config.segment_duration, 10);
+        assert_eq!(config.max_disk_usage_percent, 90.0);
+        assert_eq!(config.cleanup_check_interval, 60);
+        assert_eq!(config.server_port, 8080);
+        assert_eq!(config.server_host, "0.0.0.0");
+        assert!(config.auto_start);
+        assert_eq!(config.max_retries, 0);
+        assert_eq!(config.retry_delay, 5);
+        assert_eq!(config.ffmpeg_analyzeduration, 10_000_000);
+        assert_eq!(config.ffmpeg_probesize, 10_000_000);
+        assert_eq!(config.rtsp_transport, "tcp");
+        assert!(config.streams.is_empty());
+        assert!(config.stream_url.is_none());
+    }
+
+    #[test]
+    fn test_migrate_legacy_config_creates_stream_from_url() {
+        let mut config = Config::default();
+        config.stream_url = Some("rtsp://example.com/stream".to_string());
+        config.streams = vec![];
+
+        config.migrate_legacy_config();
+
+        assert_eq!(config.streams.len(), 1);
+        assert_eq!(config.streams[0].id, "default");
+        assert_eq!(config.streams[0].url, "rtsp://example.com/stream");
+        assert!(config.streams[0].enabled);
+        assert!(config.streams[0].output_subdir.is_none());
+    }
+
+    #[test]
+    fn test_migrate_legacy_config_does_not_overwrite_existing_streams() {
+        let mut config = Config::default();
+        config.stream_url = Some("rtsp://example.com/stream".to_string());
+        config.streams = vec![StreamConfig {
+            id: "existing".to_string(),
+            url: "rtsp://other.com/stream".to_string(),
+            enabled: true,
+            output_subdir: None,
+        }];
+
+        config.migrate_legacy_config();
+
+        assert_eq!(config.streams.len(), 1);
+        assert_eq!(config.streams[0].id, "existing");
+    }
+
+    #[test]
+    fn test_migrate_legacy_config_sets_stream_url_from_first_enabled() {
+        let mut config = Config::default();
+        config.stream_url = None;
+        config.streams = vec![
+            StreamConfig {
+                id: "disabled".to_string(),
+                url: "rtsp://disabled.com/stream".to_string(),
+                enabled: false,
+                output_subdir: None,
+            },
+            StreamConfig {
+                id: "enabled".to_string(),
+                url: "rtsp://enabled.com/stream".to_string(),
+                enabled: true,
+                output_subdir: None,
+            },
+        ];
+
+        config.migrate_legacy_config();
+
+        assert_eq!(config.stream_url, Some("rtsp://enabled.com/stream".to_string()));
+    }
+
+    #[test]
+    fn test_get_stream_output_dir_with_custom_subdir() {
+        let mut config = Config::default();
+        config.output_dir = PathBuf::from("/recordings");
+        config.streams = vec![StreamConfig {
+            id: "cam1".to_string(),
+            url: "rtsp://example.com/cam1".to_string(),
+            enabled: true,
+            output_subdir: Some("custom_subdir".to_string()),
+        }];
+
+        let output_dir = config.get_stream_output_dir("cam1");
+
+        assert_eq!(output_dir, PathBuf::from("/recordings/custom_subdir"));
+    }
+
+    #[test]
+    fn test_get_stream_output_dir_uses_stream_id_as_default() {
+        let mut config = Config::default();
+        config.output_dir = PathBuf::from("/recordings");
+        config.streams = vec![StreamConfig {
+            id: "cam2".to_string(),
+            url: "rtsp://example.com/cam2".to_string(),
+            enabled: true,
+            output_subdir: None,
+        }];
+
+        let output_dir = config.get_stream_output_dir("cam2");
+
+        assert_eq!(output_dir, PathBuf::from("/recordings/cam2"));
+    }
+
+    #[test]
+    fn test_get_stream_output_dir_for_unknown_stream() {
+        let mut config = Config::default();
+        config.output_dir = PathBuf::from("/recordings");
+        config.streams = vec![];
+
+        let output_dir = config.get_stream_output_dir("unknown");
+
+        assert_eq!(output_dir, PathBuf::from("/recordings/unknown"));
+    }
+
+    #[test]
+    fn test_get_enabled_streams_filters_disabled() {
+        let config = Config {
+            streams: vec![
+                StreamConfig {
+                    id: "enabled1".to_string(),
+                    url: "rtsp://example.com/1".to_string(),
+                    enabled: true,
+                    output_subdir: None,
+                },
+                StreamConfig {
+                    id: "disabled".to_string(),
+                    url: "rtsp://example.com/2".to_string(),
+                    enabled: false,
+                    output_subdir: None,
+                },
+                StreamConfig {
+                    id: "enabled2".to_string(),
+                    url: "rtsp://example.com/3".to_string(),
+                    enabled: true,
+                    output_subdir: None,
+                },
+            ],
+            ..Config::default()
+        };
+
+        let enabled = config.get_enabled_streams();
+
+        assert_eq!(enabled.len(), 2);
+        assert_eq!(enabled[0].id, "enabled1");
+        assert_eq!(enabled[1].id, "enabled2");
+    }
+
+    #[test]
+    fn test_get_enabled_streams_returns_empty_when_all_disabled() {
+        let config = Config {
+            streams: vec![StreamConfig {
+                id: "disabled".to_string(),
+                url: "rtsp://example.com/1".to_string(),
+                enabled: false,
+                output_subdir: None,
+            }],
+            ..Config::default()
+        };
+
+        let enabled = config.get_enabled_streams();
+
+        assert!(enabled.is_empty());
+    }
+
+    #[test]
+    fn test_stream_config_serialization() {
+        let stream = StreamConfig {
+            id: "test".to_string(),
+            url: "rtsp://example.com/stream".to_string(),
+            enabled: true,
+            output_subdir: Some("custom".to_string()),
+        };
+
+        let json = serde_json::to_string(&stream).unwrap();
+        let deserialized: StreamConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.id, stream.id);
+        assert_eq!(deserialized.url, stream.url);
+        assert_eq!(deserialized.enabled, stream.enabled);
+        assert_eq!(deserialized.output_subdir, stream.output_subdir);
+    }
+
+    #[test]
+    fn test_config_serialization_roundtrip() {
+        let config = Config {
+            stream_url: Some("rtsp://test.com/stream".to_string()),
+            streams: vec![StreamConfig {
+                id: "cam1".to_string(),
+                url: "rtsp://test.com/cam1".to_string(),
+                enabled: true,
+                output_subdir: None,
+            }],
+            output_dir: PathBuf::from("/test/recordings"),
+            segment_duration: 30,
+            max_disk_usage_percent: 85.0,
+            cleanup_check_interval: 120,
+            server_port: 9090,
+            server_host: "127.0.0.1".to_string(),
+            auto_start: false,
+            max_retries: 5,
+            retry_delay: 10,
+            ffmpeg_analyzeduration: 20_000_000,
+            ffmpeg_probesize: 20_000_000,
+            rtsp_transport: "udp".to_string(),
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: Config = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.segment_duration, config.segment_duration);
+        assert_eq!(deserialized.max_disk_usage_percent, config.max_disk_usage_percent);
+        assert_eq!(deserialized.server_port, config.server_port);
+        assert_eq!(deserialized.rtsp_transport, config.rtsp_transport);
+    }
+}
