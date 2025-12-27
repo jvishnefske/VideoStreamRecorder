@@ -188,3 +188,101 @@ impl DiskManager {
         &self.config
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_storage_info_serialization() {
+        let info = StorageInfo {
+            total_space: 1_000_000_000_000,
+            available_space: 500_000_000_000,
+            used_space: 500_000_000_000,
+            usage_percent: 50.0,
+        };
+
+        let json = serde_json::to_string(&info).unwrap();
+
+        assert!(json.contains("\"total_space\":1000000000000"));
+        assert!(json.contains("\"available_space\":500000000000"));
+        assert!(json.contains("\"used_space\":500000000000"));
+        assert!(json.contains("\"usage_percent\":50.0"));
+    }
+
+    #[test]
+    fn test_storage_info_clone() {
+        let info = StorageInfo {
+            total_space: 100,
+            available_space: 50,
+            used_space: 50,
+            usage_percent: 50.0,
+        };
+
+        let cloned = info.clone();
+
+        assert_eq!(cloned.total_space, info.total_space);
+        assert_eq!(cloned.available_space, info.available_space);
+        assert_eq!(cloned.used_space, info.used_space);
+        assert!((cloned.usage_percent - info.usage_percent).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_storage_info_debug() {
+        let info = StorageInfo {
+            total_space: 100,
+            available_space: 50,
+            used_space: 50,
+            usage_percent: 50.0,
+        };
+
+        let debug_str = format!("{:?}", info);
+
+        assert!(debug_str.contains("StorageInfo"));
+        assert!(debug_str.contains("total_space"));
+        assert!(debug_str.contains("100"));
+    }
+
+    #[test]
+    fn test_disk_manager_new() {
+        let config = Config::default();
+        let manager = DiskManager::new(config.clone());
+
+        assert_eq!(manager.get_files_deleted(), 0);
+        assert_eq!(manager.get_config().segment_duration, config.segment_duration);
+    }
+
+    #[test]
+    fn test_disk_manager_files_deleted_counter() {
+        let config = Config::default();
+        let manager = DiskManager::new(config);
+
+        assert_eq!(manager.get_files_deleted(), 0);
+
+        manager.files_deleted.fetch_add(5, Ordering::Relaxed);
+        assert_eq!(manager.get_files_deleted(), 5);
+
+        manager.files_deleted.fetch_add(3, Ordering::Relaxed);
+        assert_eq!(manager.get_files_deleted(), 8);
+    }
+
+    #[tokio::test]
+    async fn test_disk_manager_last_cleanup_initially_none() {
+        let config = Config::default();
+        let manager = DiskManager::new(config);
+
+        assert!(manager.get_last_cleanup().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_disk_manager_get_config() {
+        let mut config = Config::default();
+        config.segment_duration = 42;
+        config.max_disk_usage_percent = 75.0;
+
+        let manager = DiskManager::new(config);
+
+        assert_eq!(manager.get_config().segment_duration, 42);
+        assert!((manager.get_config().max_disk_usage_percent - 75.0).abs() < 0.001);
+    }
+}
