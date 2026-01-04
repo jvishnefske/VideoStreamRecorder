@@ -227,6 +227,10 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Mutex to serialize environment variable tests (env vars are global state)
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_default_config_values() {
@@ -445,5 +449,448 @@ mod tests {
         assert_eq!(deserialized.max_disk_usage_percent, config.max_disk_usage_percent);
         assert_eq!(deserialized.server_port, config.server_port);
         assert_eq!(deserialized.rtsp_transport, config.rtsp_transport);
+    }
+
+    /// FR-16: JSON configuration file support - Tests loading from file
+    #[test]
+    fn test_config_load_from_json_file() {
+        use tempfile::NamedTempFile;
+        use std::io::Write;
+
+        let config_json = r#"{
+            "stream_url": "rtsp://file.com/stream",
+            "streams": [],
+            "output_dir": "/tmp/test_recordings",
+            "segment_duration": 15,
+            "max_disk_usage_percent": 80.0,
+            "cleanup_check_interval": 30,
+            "server_port": 9000,
+            "server_host": "127.0.0.1",
+            "auto_start": false,
+            "max_retries": 3,
+            "retry_delay": 10,
+            "ffmpeg_analyzeduration": 5000000,
+            "ffmpeg_probesize": 5000000,
+            "rtsp_transport": "udp"
+        }"#;
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(config_json.as_bytes()).unwrap();
+
+        let config = Config::load(Some(temp_file.path().to_str().unwrap())).unwrap();
+
+        assert_eq!(config.segment_duration, 15);
+        assert_eq!(config.max_disk_usage_percent, 80.0);
+        assert_eq!(config.server_port, 9000);
+        assert_eq!(config.rtsp_transport, "udp");
+    }
+
+    /// FR-16: Tests that Config::load works without a config file
+    #[test]
+    fn test_config_load_without_file() {
+        // Clear relevant environment variables to ensure defaults are used
+        std::env::remove_var("STREAM_URL");
+        std::env::remove_var("OUTPUT_DIR");
+        std::env::remove_var("SEGMENT_DURATION");
+        std::env::remove_var("MAX_DISK_USAGE_PERCENT");
+        std::env::remove_var("CLEANUP_CHECK_INTERVAL");
+        std::env::remove_var("PORT");
+        std::env::remove_var("HOST");
+        std::env::remove_var("AUTO_START");
+        std::env::remove_var("STREAM_IDS");
+        std::env::remove_var("FFMPEG_ANALYZEDURATION");
+        std::env::remove_var("FFMPEG_PROBESIZE");
+        std::env::remove_var("RTSP_TRANSPORT");
+
+        let config = Config::load(None).unwrap();
+
+        // Should use defaults
+        assert_eq!(config.segment_duration, 10);
+        assert_eq!(config.max_disk_usage_percent, 90.0);
+        assert_eq!(config.server_port, 8080);
+        assert_eq!(config.rtsp_transport, "tcp");
+    }
+
+    /// FR-15: Tests environment variable loading for single stream
+    #[test]
+    fn test_load_from_env_stream_url() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let mut config = Config::default();
+
+        std::env::set_var("STREAM_URL", "rtsp://env.com/stream");
+        config.load_from_env();
+        std::env::remove_var("STREAM_URL");
+
+        assert_eq!(config.stream_url, Some("rtsp://env.com/stream".to_string()));
+    }
+
+    /// FR-15: Tests environment variable loading for output directory
+    #[test]
+    fn test_load_from_env_output_dir() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let mut config = Config::default();
+
+        std::env::set_var("OUTPUT_DIR", "/custom/output");
+        config.load_from_env();
+        std::env::remove_var("OUTPUT_DIR");
+
+        assert_eq!(config.output_dir, PathBuf::from("/custom/output"));
+    }
+
+    /// FR-15: Tests environment variable loading for segment duration
+    #[test]
+    fn test_load_from_env_segment_duration() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let mut config = Config::default();
+
+        std::env::set_var("SEGMENT_DURATION", "30");
+        config.load_from_env();
+        std::env::remove_var("SEGMENT_DURATION");
+
+        assert_eq!(config.segment_duration, 30);
+    }
+
+    /// FR-15: Tests invalid segment duration is ignored
+    #[test]
+    fn test_load_from_env_invalid_segment_duration() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let mut config = Config::default();
+        let original = config.segment_duration;
+
+        std::env::set_var("SEGMENT_DURATION", "not_a_number");
+        config.load_from_env();
+        std::env::remove_var("SEGMENT_DURATION");
+
+        assert_eq!(config.segment_duration, original);
+    }
+
+    /// FR-15: Tests environment variable loading for max disk usage
+    #[test]
+    fn test_load_from_env_max_disk_usage() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let mut config = Config::default();
+
+        std::env::set_var("MAX_DISK_USAGE_PERCENT", "75.5");
+        config.load_from_env();
+        std::env::remove_var("MAX_DISK_USAGE_PERCENT");
+
+        assert!((config.max_disk_usage_percent - 75.5).abs() < 0.001);
+    }
+
+    /// FR-15: Tests environment variable loading for cleanup interval
+    #[test]
+    fn test_load_from_env_cleanup_interval() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let mut config = Config::default();
+
+        std::env::set_var("CLEANUP_CHECK_INTERVAL", "120");
+        config.load_from_env();
+        std::env::remove_var("CLEANUP_CHECK_INTERVAL");
+
+        assert_eq!(config.cleanup_check_interval, 120);
+    }
+
+    /// FR-15: Tests environment variable loading for port
+    #[test]
+    fn test_load_from_env_port() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let mut config = Config::default();
+
+        std::env::set_var("PORT", "3000");
+        config.load_from_env();
+        std::env::remove_var("PORT");
+
+        assert_eq!(config.server_port, 3000);
+    }
+
+    /// FR-15: Tests environment variable loading for host
+    #[test]
+    fn test_load_from_env_host() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let mut config = Config::default();
+
+        std::env::set_var("HOST", "localhost");
+        config.load_from_env();
+        std::env::remove_var("HOST");
+
+        assert_eq!(config.server_host, "localhost");
+    }
+
+    /// FR-15: Tests environment variable loading for auto_start true
+    #[test]
+    fn test_load_from_env_auto_start_true() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let mut config = Config::default();
+        config.auto_start = false;
+
+        std::env::set_var("AUTO_START", "true");
+        config.load_from_env();
+        std::env::remove_var("AUTO_START");
+
+        assert!(config.auto_start);
+    }
+
+    /// FR-15: Tests environment variable loading for auto_start false
+    #[test]
+    fn test_load_from_env_auto_start_false() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let mut config = Config::default();
+
+        std::env::set_var("AUTO_START", "false");
+        config.load_from_env();
+        std::env::remove_var("AUTO_START");
+
+        assert!(!config.auto_start);
+    }
+
+    /// FR-15: Tests environment variable loading for FFmpeg analyzeduration
+    #[test]
+    fn test_load_from_env_ffmpeg_analyzeduration() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let mut config = Config::default();
+
+        std::env::set_var("FFMPEG_ANALYZEDURATION", "20000000");
+        config.load_from_env();
+        std::env::remove_var("FFMPEG_ANALYZEDURATION");
+
+        assert_eq!(config.ffmpeg_analyzeduration, 20_000_000);
+    }
+
+    /// FR-15: Tests environment variable loading for FFmpeg probesize
+    #[test]
+    fn test_load_from_env_ffmpeg_probesize() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let mut config = Config::default();
+
+        std::env::set_var("FFMPEG_PROBESIZE", "15000000");
+        config.load_from_env();
+        std::env::remove_var("FFMPEG_PROBESIZE");
+
+        assert_eq!(config.ffmpeg_probesize, 15_000_000);
+    }
+
+    /// FR-15: Tests environment variable loading for RTSP transport tcp
+    #[test]
+    fn test_load_from_env_rtsp_transport_tcp() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let mut config = Config::default();
+        config.rtsp_transport = "udp".to_string(); // Start with non-default
+
+        std::env::set_var("RTSP_TRANSPORT", "tcp");
+        config.load_from_env();
+        std::env::remove_var("RTSP_TRANSPORT");
+
+        assert_eq!(config.rtsp_transport, "tcp");
+    }
+
+    /// FR-15: Tests environment variable loading for RTSP transport udp
+    #[test]
+    fn test_load_from_env_rtsp_transport_udp() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let mut config = Config::default();
+
+        std::env::set_var("RTSP_TRANSPORT", "udp");
+        config.load_from_env();
+        std::env::remove_var("RTSP_TRANSPORT");
+
+        assert_eq!(config.rtsp_transport, "udp");
+    }
+
+    /// FR-15: Tests invalid RTSP transport is ignored
+    #[test]
+    fn test_load_from_env_rtsp_transport_invalid() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let mut config = Config::default();
+        let original = config.rtsp_transport.clone();
+
+        std::env::set_var("RTSP_TRANSPORT", "invalid");
+        config.load_from_env();
+        std::env::remove_var("RTSP_TRANSPORT");
+
+        assert_eq!(config.rtsp_transport, original);
+    }
+
+    /// FR-15: Tests multi-stream environment variable loading
+    #[test]
+    fn test_load_streams_from_env() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let mut config = Config::default();
+
+        std::env::set_var("STREAM_IDS", "cam1,cam2");
+        std::env::set_var("STREAM_URL_CAM1", "rtsp://example.com/cam1");
+        std::env::set_var("STREAM_URL_CAM2", "rtsp://example.com/cam2");
+        std::env::set_var("STREAM_ENABLED_CAM1", "true");
+        std::env::set_var("STREAM_ENABLED_CAM2", "false");
+        std::env::set_var("STREAM_SUBDIR_CAM1", "camera1");
+
+        config.load_from_env();
+
+        std::env::remove_var("STREAM_IDS");
+        std::env::remove_var("STREAM_URL_CAM1");
+        std::env::remove_var("STREAM_URL_CAM2");
+        std::env::remove_var("STREAM_ENABLED_CAM1");
+        std::env::remove_var("STREAM_ENABLED_CAM2");
+        std::env::remove_var("STREAM_SUBDIR_CAM1");
+
+        assert_eq!(config.streams.len(), 2);
+        assert_eq!(config.streams[0].id, "cam1");
+        assert_eq!(config.streams[1].id, "cam2");
+        assert!(config.streams[0].enabled);
+        assert!(!config.streams[1].enabled);
+        assert_eq!(config.streams[0].output_subdir, Some("camera1".to_string()));
+    }
+
+    /// FR-15: Tests multi-stream with empty stream ID is skipped
+    #[test]
+    fn test_load_streams_from_env_empty_id_skipped() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let mut config = Config::default();
+
+        std::env::set_var("STREAM_IDS", "cam1,,cam2");
+        std::env::set_var("STREAM_URL_CAM1", "rtsp://example.com/cam1");
+        std::env::set_var("STREAM_URL_CAM2", "rtsp://example.com/cam2");
+
+        config.load_from_env();
+
+        std::env::remove_var("STREAM_IDS");
+        std::env::remove_var("STREAM_URL_CAM1");
+        std::env::remove_var("STREAM_URL_CAM2");
+
+        // Empty stream ID should be skipped, so we get exactly 2 streams
+        assert_eq!(config.streams.len(), 2);
+    }
+
+    /// FR-15: Tests multi-stream without URL is skipped
+    #[test]
+    fn test_load_streams_from_env_missing_url() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let mut config = Config::default();
+
+        std::env::set_var("STREAM_IDS", "cam1,cam2");
+        std::env::set_var("STREAM_URL_CAM1", "rtsp://example.com/cam1");
+        // Intentionally not setting STREAM_URL_CAM2
+
+        config.load_from_env();
+
+        std::env::remove_var("STREAM_IDS");
+        std::env::remove_var("STREAM_URL_CAM1");
+
+        // cam2 should be skipped due to missing URL
+        assert_eq!(config.streams.len(), 1);
+        assert_eq!(config.streams[0].id, "cam1");
+    }
+
+    /// FR-15: Tests stream defaults to enabled when STREAM_ENABLED not set
+    #[test]
+    fn test_load_streams_from_env_default_enabled() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let mut config = Config::default();
+
+        std::env::set_var("STREAM_IDS", "cam1");
+        std::env::set_var("STREAM_URL_CAM1", "rtsp://example.com/cam1");
+
+        config.load_from_env();
+
+        std::env::remove_var("STREAM_IDS");
+        std::env::remove_var("STREAM_URL_CAM1");
+
+        assert_eq!(config.streams.len(), 1);
+        assert!(config.streams[0].enabled); // Default is enabled
+    }
+
+    /// FR-15: Tests empty STREAM_IDS doesn't replace existing streams
+    #[test]
+    fn test_load_streams_from_env_empty_ids() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let mut config = Config::default();
+        config.streams = vec![StreamConfig {
+            id: "existing".to_string(),
+            url: "rtsp://existing.com/stream".to_string(),
+            enabled: true,
+            output_subdir: None,
+        }];
+
+        std::env::set_var("STREAM_IDS", "");
+        config.load_from_env();
+        std::env::remove_var("STREAM_IDS");
+
+        // Existing streams should remain
+        assert_eq!(config.streams.len(), 1);
+        assert_eq!(config.streams[0].id, "existing");
+    }
+
+    /// FR-17: Tests migrate_legacy_config when streams is empty but has no stream_url
+    #[test]
+    fn test_migrate_legacy_no_url_no_streams() {
+        let mut config = Config::default();
+        config.stream_url = None;
+        config.streams = vec![];
+
+        config.migrate_legacy_config();
+
+        assert!(config.streams.is_empty());
+        assert!(config.stream_url.is_none());
+    }
+
+    /// FR-17: Tests migrate_legacy_config with all disabled streams
+    #[test]
+    fn test_migrate_legacy_all_disabled_streams() {
+        let mut config = Config::default();
+        config.stream_url = None;
+        config.streams = vec![
+            StreamConfig {
+                id: "disabled1".to_string(),
+                url: "rtsp://disabled1.com/stream".to_string(),
+                enabled: false,
+                output_subdir: None,
+            },
+            StreamConfig {
+                id: "disabled2".to_string(),
+                url: "rtsp://disabled2.com/stream".to_string(),
+                enabled: false,
+                output_subdir: None,
+            },
+        ];
+
+        config.migrate_legacy_config();
+
+        // stream_url should remain None since no enabled streams
+        assert!(config.stream_url.is_none());
+    }
+
+    /// Tests config load fails with invalid JSON
+    #[test]
+    fn test_config_load_invalid_json() {
+        use tempfile::NamedTempFile;
+        use std::io::Write;
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(b"{ invalid json }").unwrap();
+
+        let result = Config::load(Some(temp_file.path().to_str().unwrap()));
+
+        assert!(result.is_err());
+    }
+
+    /// Tests config load fails with non-existent file
+    #[test]
+    fn test_config_load_nonexistent_file() {
+        let result = Config::load(Some("/nonexistent/path/config.json"));
+
+        assert!(result.is_err());
+    }
+
+    /// Tests StreamConfig output_subdir default
+    #[test]
+    fn test_stream_config_output_subdir_default() {
+        let json = r#"{
+            "id": "test",
+            "url": "rtsp://test.com",
+            "enabled": true
+        }"#;
+
+        let stream: StreamConfig = serde_json::from_str(json).unwrap();
+
+        assert!(stream.output_subdir.is_none());
     }
 }

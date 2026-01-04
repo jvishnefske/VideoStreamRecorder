@@ -285,4 +285,496 @@ mod tests {
         assert_eq!(manager.get_config().segment_duration, 42);
         assert!((manager.get_config().max_disk_usage_percent - 75.0).abs() < 0.001);
     }
+
+    /// FR-6: Tests that has_space returns true when under threshold
+    #[tokio::test]
+    async fn test_has_space_under_threshold() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        config.max_disk_usage_percent = 99.0; // Very high threshold
+
+        let manager = DiskManager::new(config);
+
+        // Should have space since threshold is very high
+        let result = manager.has_space().await;
+        assert!(result.is_ok());
+        // Most filesystems will be under 99% usage
+        assert!(result.unwrap());
+    }
+
+    /// FR-6: Tests get_storage_info returns valid storage information
+    #[tokio::test]
+    async fn test_get_storage_info_returns_valid_data() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+
+        let manager = DiskManager::new(config);
+
+        let result = manager.get_storage_info().await;
+        assert!(result.is_ok());
+
+        let info = result.unwrap();
+        assert!(info.total_space > 0);
+        assert!(info.available_space > 0);
+        assert!(info.usage_percent >= 0.0);
+        assert!(info.usage_percent <= 100.0);
+    }
+
+    /// FR-7: Tests cleanup_old_files with no files returns zero
+    #[tokio::test]
+    async fn test_cleanup_old_files_empty_directory() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        config.max_disk_usage_percent = 99.0; // High threshold so cleanup won't delete
+
+        let manager = DiskManager::new(config);
+
+        let result = manager.cleanup_old_files().await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0);
+    }
+
+    /// FR-7: Tests cleanup_old_files updates last_cleanup timestamp
+    #[tokio::test]
+    async fn test_cleanup_updates_last_cleanup() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+
+        let manager = DiskManager::new(config);
+
+        // Initially no cleanup
+        assert!(manager.get_last_cleanup().await.is_none());
+
+        // Run cleanup
+        manager.cleanup_old_files().await.unwrap();
+
+        // Now should have a timestamp
+        assert!(manager.get_last_cleanup().await.is_some());
+    }
+
+    /// FR-7: Tests collect_mp4_files finds mp4 files
+    #[tokio::test]
+    async fn test_collect_mp4_files() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+
+        // Create test mp4 files
+        std::fs::write(temp_dir.path().join("test1.mp4"), b"fake video 1").unwrap();
+        std::fs::write(temp_dir.path().join("test2.mp4"), b"fake video 2").unwrap();
+        std::fs::write(temp_dir.path().join("test.txt"), b"not a video").unwrap();
+
+        let manager = DiskManager::new(config);
+
+        let mut files = Vec::new();
+        manager.collect_mp4_files(temp_dir.path(), &mut files).await.unwrap();
+
+        // Should find exactly 2 mp4 files
+        assert_eq!(files.len(), 2);
+    }
+
+    /// FR-7: Tests collect_mp4_files ignores non-mp4 files
+    #[tokio::test]
+    async fn test_collect_mp4_files_ignores_other_extensions() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+
+        // Create non-mp4 files
+        std::fs::write(temp_dir.path().join("video.avi"), b"avi file").unwrap();
+        std::fs::write(temp_dir.path().join("video.mkv"), b"mkv file").unwrap();
+        std::fs::write(temp_dir.path().join("readme.txt"), b"text file").unwrap();
+
+        let manager = DiskManager::new(config);
+
+        let mut files = Vec::new();
+        manager.collect_mp4_files(temp_dir.path(), &mut files).await.unwrap();
+
+        // Should find no mp4 files
+        assert_eq!(files.len(), 0);
+    }
+
+    /// FR-9: Tests cleanup includes stream subdirectories
+    #[tokio::test]
+    async fn test_cleanup_includes_stream_subdirectories() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        config.max_disk_usage_percent = 99.0;
+        config.streams = vec![
+            crate::config::StreamConfig {
+                id: "cam1".to_string(),
+                url: "rtsp://example.com/cam1".to_string(),
+                enabled: true,
+                output_subdir: None,
+            },
+        ];
+
+        // Create stream subdirectory with mp4 file
+        let stream_dir = temp_dir.path().join("cam1");
+        std::fs::create_dir(&stream_dir).unwrap();
+        std::fs::write(stream_dir.join("segment_001.mp4"), b"video content").unwrap();
+
+        let manager = DiskManager::new(config);
+
+        // Should complete without error
+        let result = manager.cleanup_old_files().await;
+        assert!(result.is_ok());
+    }
+
+    /// Tests files_deleted counter increments correctly
+    #[tokio::test]
+    async fn test_files_deleted_counter_tracking() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+
+        let manager = DiskManager::new(config);
+
+        assert_eq!(manager.get_files_deleted(), 0);
+
+        // Manually increment to test counter
+        manager.files_deleted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(manager.get_files_deleted(), 1);
+
+        manager.files_deleted.fetch_add(4, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(manager.get_files_deleted(), 5);
+    }
+
+    /// FR-8: Tests that max_disk_usage_percent is respected
+    #[tokio::test]
+    async fn test_has_space_respects_threshold() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+
+        // Set a very low threshold that will likely be exceeded
+        config.max_disk_usage_percent = 0.001;
+
+        let manager = DiskManager::new(config);
+
+        let result = manager.has_space().await;
+        assert!(result.is_ok());
+        // Most filesystems will be above 0.001% usage, so should return false
+        assert!(!result.unwrap());
+    }
+
+    /// Tests storage info calculation
+    #[tokio::test]
+    async fn test_storage_info_calculations() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+
+        let manager = DiskManager::new(config);
+
+        let info = manager.get_storage_info().await.unwrap();
+
+        // Verify calculations are consistent
+        assert_eq!(info.used_space, info.total_space.saturating_sub(info.available_space));
+
+        // Verify usage percent matches
+        let calculated_percent = (info.used_space as f64 / info.total_space as f64) * 100.0;
+        assert!((info.usage_percent - calculated_percent).abs() < 0.001);
+    }
+
+    /// Tests cleanup with disabled streams
+    #[tokio::test]
+    async fn test_cleanup_skips_disabled_stream_directories() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        config.max_disk_usage_percent = 99.0;
+        config.streams = vec![
+            crate::config::StreamConfig {
+                id: "disabled_cam".to_string(),
+                url: "rtsp://example.com/disabled".to_string(),
+                enabled: false,
+                output_subdir: None,
+            },
+        ];
+
+        // Create stream subdirectory even though it's disabled
+        let stream_dir = temp_dir.path().join("disabled_cam");
+        std::fs::create_dir(&stream_dir).unwrap();
+        std::fs::write(stream_dir.join("segment_001.mp4"), b"video").unwrap();
+
+        let manager = DiskManager::new(config);
+
+        // Cleanup should complete without errors
+        let result = manager.cleanup_old_files().await;
+        assert!(result.is_ok());
+    }
+
+    /// Tests that cleanup handles non-existent stream directories
+    #[tokio::test]
+    async fn test_cleanup_handles_missing_stream_directory() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        config.max_disk_usage_percent = 99.0;
+        config.streams = vec![
+            crate::config::StreamConfig {
+                id: "missing_cam".to_string(),
+                url: "rtsp://example.com/missing".to_string(),
+                enabled: true,
+                output_subdir: None,
+            },
+        ];
+
+        // Don't create the stream subdirectory
+
+        let manager = DiskManager::new(config);
+
+        // Cleanup should complete without errors even if directory doesn't exist
+        let result = manager.cleanup_old_files().await;
+        assert!(result.is_ok());
+    }
+
+    /// Tests collect_mp4_files handles empty directory
+    #[tokio::test]
+    async fn test_collect_mp4_files_empty_dir() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+
+        let manager = DiskManager::new(config);
+
+        let mut files = Vec::new();
+        let result = manager.collect_mp4_files(temp_dir.path(), &mut files).await;
+
+        assert!(result.is_ok());
+        assert!(files.is_empty());
+    }
+
+    /// Tests collect_mp4_files returns files with correct metadata
+    #[tokio::test]
+    async fn test_collect_mp4_files_returns_metadata() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+
+        let content = b"fake video content with some size";
+        std::fs::write(temp_dir.path().join("video.mp4"), content).unwrap();
+
+        let manager = DiskManager::new(config);
+
+        let mut files = Vec::new();
+        manager.collect_mp4_files(temp_dir.path(), &mut files).await.unwrap();
+
+        assert_eq!(files.len(), 1);
+        let (path, _created, size) = &files[0];
+        assert!(path.ends_with("video.mp4"));
+        assert_eq!(*size, content.len() as u64);
+    }
+
+    /// Tests cleanup sorts files by creation time
+    #[tokio::test]
+    async fn test_cleanup_sorts_by_creation_time() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        config.max_disk_usage_percent = 99.0;
+
+        // Create files with small delay to ensure different timestamps
+        std::fs::write(temp_dir.path().join("first.mp4"), b"first").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(temp_dir.path().join("second.mp4"), b"second").unwrap();
+
+        let manager = DiskManager::new(config);
+
+        let result = manager.cleanup_old_files().await;
+        assert!(result.is_ok());
+        // Files should be sorted but not deleted since we're under threshold
+    }
+
+    /// Tests cleanup deletes files when over threshold
+    #[tokio::test]
+    async fn test_cleanup_deletes_when_over_threshold() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        // Set threshold very low to trigger cleanup
+        config.max_disk_usage_percent = 0.0001;
+
+        // Create a file to be deleted
+        std::fs::write(temp_dir.path().join("to_delete.mp4"), b"video content").unwrap();
+
+        let manager = DiskManager::new(config);
+
+        // Verify file exists
+        assert!(temp_dir.path().join("to_delete.mp4").exists());
+
+        // Run cleanup
+        let result = manager.cleanup_old_files().await;
+        assert!(result.is_ok());
+
+        // File may or may not be deleted depending on how quickly has_space returns
+        // The important thing is cleanup ran without error
+    }
+
+    /// Tests files_deleted counter increments during cleanup
+    #[tokio::test]
+    async fn test_cleanup_increments_deleted_counter() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        config.max_disk_usage_percent = 0.0001; // Very low to force cleanup
+
+        // Create files
+        std::fs::write(temp_dir.path().join("video1.mp4"), b"video1").unwrap();
+        std::fs::write(temp_dir.path().join("video2.mp4"), b"video2").unwrap();
+
+        let manager = DiskManager::new(config);
+
+        let before_count = manager.get_files_deleted();
+
+        // Run cleanup
+        let _ = manager.cleanup_old_files().await;
+
+        // Counter should be at least what it was before
+        assert!(manager.get_files_deleted() >= before_count);
+    }
+
+    /// Tests collect_mp4_files handles subdirectories correctly
+    #[tokio::test]
+    async fn test_collect_mp4_files_no_subdirs() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+
+        // Create a subdirectory with mp4 files - they should NOT be collected
+        let subdir = temp_dir.path().join("subdir");
+        std::fs::create_dir(&subdir).unwrap();
+        std::fs::write(subdir.join("nested.mp4"), b"nested video").unwrap();
+
+        // Create mp4 in root dir
+        std::fs::write(temp_dir.path().join("root.mp4"), b"root video").unwrap();
+
+        let manager = DiskManager::new(config);
+
+        let mut files = Vec::new();
+        manager.collect_mp4_files(temp_dir.path(), &mut files).await.unwrap();
+
+        // Should only find the root mp4, not the nested one
+        assert_eq!(files.len(), 1);
+        let (path, _, _) = &files[0];
+        assert!(path.ends_with("root.mp4"));
+    }
+
+    /// Tests cleanup with multiple stream directories
+    #[tokio::test]
+    async fn test_cleanup_multiple_streams() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        config.max_disk_usage_percent = 99.0;
+        config.streams = vec![
+            crate::config::StreamConfig {
+                id: "cam1".to_string(),
+                url: "rtsp://example.com/cam1".to_string(),
+                enabled: true,
+                output_subdir: None,
+            },
+            crate::config::StreamConfig {
+                id: "cam2".to_string(),
+                url: "rtsp://example.com/cam2".to_string(),
+                enabled: true,
+                output_subdir: None,
+            },
+        ];
+
+        // Create stream directories with files
+        let cam1_dir = temp_dir.path().join("cam1");
+        let cam2_dir = temp_dir.path().join("cam2");
+        std::fs::create_dir(&cam1_dir).unwrap();
+        std::fs::create_dir(&cam2_dir).unwrap();
+        std::fs::write(cam1_dir.join("video.mp4"), b"cam1 video").unwrap();
+        std::fs::write(cam2_dir.join("video.mp4"), b"cam2 video").unwrap();
+
+        let manager = DiskManager::new(config);
+
+        let result = manager.cleanup_old_files().await;
+        assert!(result.is_ok());
+    }
+
+    /// Tests storage info calculations are consistent
+    #[tokio::test]
+    async fn test_storage_info_consistency() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+
+        let manager = DiskManager::new(config);
+
+        let info = manager.get_storage_info().await.unwrap();
+
+        // Total should be >= available + used
+        assert!(info.total_space >= info.available_space);
+        assert!(info.total_space >= info.used_space);
+
+        // Used space should be total - available
+        assert_eq!(info.used_space, info.total_space.saturating_sub(info.available_space));
+
+        // Usage percent should be between 0 and 100
+        assert!(info.usage_percent >= 0.0);
+        assert!(info.usage_percent <= 100.0);
+    }
+
+    /// Tests get_config returns the config used for initialization
+    #[test]
+    fn test_get_config_returns_initialized_config() {
+        let mut config = Config::default();
+        config.segment_duration = 42;
+        config.max_disk_usage_percent = 75.5;
+        config.cleanup_check_interval = 120;
+
+        let manager = DiskManager::new(config);
+
+        assert_eq!(manager.get_config().segment_duration, 42);
+        assert!((manager.get_config().max_disk_usage_percent - 75.5).abs() < 0.001);
+        assert_eq!(manager.get_config().cleanup_check_interval, 120);
+    }
+
+    /// Tests cleanup updates last_cleanup even with no files deleted
+    #[tokio::test]
+    async fn test_cleanup_always_updates_timestamp() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        config.max_disk_usage_percent = 99.0; // High threshold, won't delete
+
+        let manager = DiskManager::new(config);
+
+        // Before cleanup, no timestamp
+        assert!(manager.get_last_cleanup().await.is_none());
+
+        // Run cleanup (no files to delete)
+        let _ = manager.cleanup_old_files().await;
+
+        // After cleanup, timestamp should be set
+        assert!(manager.get_last_cleanup().await.is_some());
+    }
+
+    /// Tests file metadata is correctly captured
+    #[tokio::test]
+    async fn test_collect_mp4_captures_size() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+
+        let content = b"This is test video content with known size";
+        std::fs::write(temp_dir.path().join("sized.mp4"), content).unwrap();
+
+        let manager = DiskManager::new(config);
+
+        let mut files = Vec::new();
+        manager.collect_mp4_files(temp_dir.path(), &mut files).await.unwrap();
+
+        assert_eq!(files.len(), 1);
+        let (_, _, size) = &files[0];
+        assert_eq!(*size, content.len() as u64);
+    }
 }

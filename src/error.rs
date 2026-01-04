@@ -69,4 +69,49 @@ mod tests {
         let debug_str = format!("{:?}", error);
         assert!(debug_str.contains("DiskFull"));
     }
+
+    #[test]
+    fn test_anyhow_error_conversion() {
+        let anyhow_error = anyhow::anyhow!("Test anyhow error");
+        let recorder_error: RecorderError = anyhow_error.into();
+        assert!(matches!(recorder_error, RecorderError::Anyhow(_)));
+        assert!(recorder_error.to_string().contains("Anyhow error"));
+    }
+
+    #[test]
+    fn test_already_recording_debug() {
+        let error = RecorderError::AlreadyRecording;
+        let debug_str = format!("{:?}", error);
+        assert!(debug_str.contains("AlreadyRecording"));
+    }
+
+    #[test]
+    fn test_not_recording_debug() {
+        let error = RecorderError::NotRecording;
+        let debug_str = format!("{:?}", error);
+        assert!(debug_str.contains("NotRecording"));
+    }
+
+    #[test]
+    fn test_stream_connection_debug() {
+        let error = RecorderError::StreamConnection("test message".to_string());
+        let debug_str = format!("{:?}", error);
+        assert!(debug_str.contains("StreamConnection"));
+        assert!(debug_str.contains("test message"));
+    }
+
+    #[test]
+    fn test_io_error_display() {
+        let io_error = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Permission denied");
+        let recorder_error: RecorderError = io_error.into();
+        let display_str = recorder_error.to_string();
+        assert!(display_str.contains("IO error"));
+    }
+
+    #[test]
+    fn test_disk_full_debug() {
+        let error = RecorderError::DiskFull;
+        let debug_str = format!("{:?}", error);
+        assert!(debug_str.contains("DiskFull"));
+    }
 }

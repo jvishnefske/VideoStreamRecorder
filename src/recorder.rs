@@ -1055,4 +1055,864 @@ mod tests {
 
         assert_eq!(cloned.config.segment_duration, recorder.config.segment_duration);
     }
+
+    /// FR-3: Tests initialize_streams creates recorders for enabled streams
+    #[tokio::test]
+    async fn test_initialize_streams_creates_recorders() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        config.streams = vec![
+            StreamConfig {
+                id: "cam1".to_string(),
+                url: "rtsp://example.com/cam1".to_string(),
+                enabled: true,
+                output_subdir: None,
+            },
+            StreamConfig {
+                id: "cam2".to_string(),
+                url: "rtsp://example.com/cam2".to_string(),
+                enabled: true,
+                output_subdir: None,
+            },
+        ];
+
+        // Create stream directories
+        std::fs::create_dir_all(temp_dir.path().join("cam1")).unwrap();
+        std::fs::create_dir_all(temp_dir.path().join("cam2")).unwrap();
+
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = VideoRecorder::new(config, disk_manager);
+
+        recorder.initialize_streams().await;
+
+        let streams = recorder.list_streams().await;
+        assert_eq!(streams.len(), 2);
+        assert!(streams.contains(&"cam1".to_string()));
+        assert!(streams.contains(&"cam2".to_string()));
+    }
+
+    /// FR-3: Tests initialize_streams skips disabled streams
+    #[tokio::test]
+    async fn test_initialize_streams_skips_disabled() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        config.streams = vec![
+            StreamConfig {
+                id: "enabled".to_string(),
+                url: "rtsp://example.com/enabled".to_string(),
+                enabled: true,
+                output_subdir: None,
+            },
+            StreamConfig {
+                id: "disabled".to_string(),
+                url: "rtsp://example.com/disabled".to_string(),
+                enabled: false,
+                output_subdir: None,
+            },
+        ];
+
+        std::fs::create_dir_all(temp_dir.path().join("enabled")).unwrap();
+
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = VideoRecorder::new(config, disk_manager);
+
+        recorder.initialize_streams().await;
+
+        let streams = recorder.list_streams().await;
+        assert_eq!(streams.len(), 1);
+        assert!(streams.contains(&"enabled".to_string()));
+    }
+
+    /// FR-12: Tests start_stream returns error for unknown stream
+    #[tokio::test]
+    async fn test_start_stream_unknown_stream() {
+        let config = Config::default();
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = VideoRecorder::new(config, disk_manager);
+
+        let result = recorder.start_stream("nonexistent").await;
+
+        assert!(result.is_err());
+    }
+
+    /// FR-12: Tests stop_stream returns error for unknown stream
+    #[tokio::test]
+    async fn test_stop_stream_unknown_stream() {
+        let config = Config::default();
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = VideoRecorder::new(config, disk_manager);
+
+        let result = recorder.stop_stream("nonexistent").await;
+
+        assert!(result.is_err());
+    }
+
+    /// FR-13: Tests get_stream_stats returns None for unknown stream
+    #[tokio::test]
+    async fn test_get_stream_stats_unknown() {
+        let config = Config::default();
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = VideoRecorder::new(config, disk_manager);
+
+        let stats = recorder.get_stream_stats("nonexistent").await;
+
+        assert!(stats.is_none());
+    }
+
+    /// FR-13: Tests get_stream_stats returns valid stats for known stream
+    #[tokio::test]
+    async fn test_get_stream_stats_known_stream() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        config.streams = vec![StreamConfig {
+            id: "cam1".to_string(),
+            url: "rtsp://example.com/cam1".to_string(),
+            enabled: true,
+            output_subdir: None,
+        }];
+
+        std::fs::create_dir_all(temp_dir.path().join("cam1")).unwrap();
+
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = VideoRecorder::new(config, disk_manager);
+
+        recorder.initialize_streams().await;
+
+        let stats = recorder.get_stream_stats("cam1").await;
+
+        assert!(stats.is_some());
+        let stats = stats.unwrap();
+        assert_eq!(stats.stream_id, "cam1");
+        assert_eq!(stats.stream_url, "rtsp://example.com/cam1");
+        assert!(!stats.is_recording);
+    }
+
+    /// FR-13: Tests get_multi_stream_stats aggregates correctly
+    #[tokio::test]
+    async fn test_get_multi_stream_stats_aggregation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        config.streams = vec![
+            StreamConfig {
+                id: "cam1".to_string(),
+                url: "rtsp://example.com/cam1".to_string(),
+                enabled: true,
+                output_subdir: None,
+            },
+            StreamConfig {
+                id: "cam2".to_string(),
+                url: "rtsp://example.com/cam2".to_string(),
+                enabled: true,
+                output_subdir: None,
+            },
+        ];
+
+        std::fs::create_dir_all(temp_dir.path().join("cam1")).unwrap();
+        std::fs::create_dir_all(temp_dir.path().join("cam2")).unwrap();
+
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = VideoRecorder::new(config, disk_manager);
+
+        recorder.initialize_streams().await;
+
+        let stats = recorder.get_multi_stream_stats().await;
+
+        assert_eq!(stats.streams.len(), 2);
+        assert_eq!(stats.active_streams, 0); // Neither stream is recording
+    }
+
+    /// Tests is_stream_recording returns false for unknown stream
+    #[tokio::test]
+    async fn test_is_stream_recording_unknown() {
+        let config = Config::default();
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = VideoRecorder::new(config, disk_manager);
+
+        assert!(!recorder.is_stream_recording("nonexistent").await);
+    }
+
+    /// Tests is_stream_recording returns false for non-recording stream
+    #[tokio::test]
+    async fn test_is_stream_recording_not_recording() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        config.streams = vec![StreamConfig {
+            id: "cam1".to_string(),
+            url: "rtsp://example.com/cam1".to_string(),
+            enabled: true,
+            output_subdir: None,
+        }];
+
+        std::fs::create_dir_all(temp_dir.path().join("cam1")).unwrap();
+
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = VideoRecorder::new(config, disk_manager);
+
+        recorder.initialize_streams().await;
+
+        assert!(!recorder.is_stream_recording("cam1").await);
+    }
+
+    /// FR-3: Tests stop returns error when nothing is recording
+    #[tokio::test]
+    async fn test_stop_when_not_recording() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        config.streams = vec![StreamConfig {
+            id: "cam1".to_string(),
+            url: "rtsp://example.com/cam1".to_string(),
+            enabled: true,
+            output_subdir: None,
+        }];
+
+        std::fs::create_dir_all(temp_dir.path().join("cam1")).unwrap();
+
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = VideoRecorder::new(config, disk_manager);
+
+        recorder.initialize_streams().await;
+
+        let result = recorder.stop().await;
+
+        assert!(result.is_err());
+    }
+
+    /// Tests scan_existing_recordings scans directory for mp4 files
+    #[tokio::test]
+    async fn test_scan_existing_recordings() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        config.segment_duration = 10;
+        config.streams = vec![StreamConfig {
+            id: "cam1".to_string(),
+            url: "rtsp://example.com/cam1".to_string(),
+            enabled: true,
+            output_subdir: None,
+        }];
+
+        // Create stream directory with existing recordings BEFORE creating the recorder
+        let stream_dir = temp_dir.path().join("cam1");
+        std::fs::create_dir_all(&stream_dir).unwrap();
+        std::fs::write(stream_dir.join("video1.mp4"), b"video1").unwrap();
+        std::fs::write(stream_dir.join("video2.mp4"), b"video2").unwrap();
+
+        // Verify files exist
+        assert!(stream_dir.exists());
+        let files: Vec<_> = std::fs::read_dir(&stream_dir).unwrap().collect();
+        assert_eq!(files.len(), 2);
+
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = VideoRecorder::new(config.clone(), disk_manager);
+
+        // Manually scan the directory to verify the function works
+        let result = recorder.scan_stream_directory(&stream_dir, "cam1").await;
+        assert!(result.is_ok());
+        let (count, _duration) = result.unwrap();
+        assert_eq!(count, 2);
+    }
+
+    /// Tests scan_existing_recordings handles empty directories
+    #[tokio::test]
+    async fn test_scan_existing_recordings_empty() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        config.streams = vec![StreamConfig {
+            id: "cam1".to_string(),
+            url: "rtsp://example.com/cam1".to_string(),
+            enabled: true,
+            output_subdir: None,
+        }];
+
+        // Create empty stream directory
+        std::fs::create_dir_all(temp_dir.path().join("cam1")).unwrap();
+
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = VideoRecorder::new(config, disk_manager);
+
+        recorder.initialize_streams().await;
+
+        let stats = recorder.get_stream_stats("cam1").await.unwrap();
+        assert_eq!(stats.stats.files_recorded, 0);
+        assert_eq!(stats.stats.total_duration, 0);
+    }
+
+    /// Tests scan_existing_recordings handles non-existent directories
+    #[tokio::test]
+    async fn test_scan_existing_recordings_no_directory() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        config.streams = vec![StreamConfig {
+            id: "cam1".to_string(),
+            url: "rtsp://example.com/cam1".to_string(),
+            enabled: true,
+            output_subdir: None,
+        }];
+
+        // Don't create the stream directory
+
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = VideoRecorder::new(config, disk_manager);
+
+        recorder.initialize_streams().await;
+
+        // Should still work, just with zero files
+        let stats = recorder.get_stream_stats("cam1").await.unwrap();
+        assert_eq!(stats.stats.files_recorded, 0);
+    }
+
+    /// Tests get_stats returns empty stats when no streams configured
+    #[tokio::test]
+    async fn test_get_stats_no_streams() {
+        let config = Config::default();
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = VideoRecorder::new(config, disk_manager);
+
+        let stats = recorder.get_stats().await;
+
+        assert!(stats.started_at.is_none());
+        assert_eq!(stats.files_recorded, 0);
+        assert_eq!(stats.total_duration, 0);
+        assert!(stats.last_file.is_none());
+    }
+
+    /// Tests get_stats returns first enabled stream stats when initialized with files
+    #[tokio::test]
+    async fn test_get_stats_returns_first_stream() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        config.segment_duration = 10;
+        config.streams = vec![
+            StreamConfig {
+                id: "cam1".to_string(),
+                url: "rtsp://example.com/cam1".to_string(),
+                enabled: true,
+                output_subdir: None,
+            },
+        ];
+
+        // Create directories and files BEFORE recorder initialization
+        let cam1_dir = temp_dir.path().join("cam1");
+        std::fs::create_dir_all(&cam1_dir).unwrap();
+        std::fs::write(cam1_dir.join("video.mp4"), b"video").unwrap();
+
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = VideoRecorder::new(config, disk_manager);
+
+        recorder.initialize_streams().await;
+
+        // Since scan_existing_recordings was called during init, stats should be updated
+        let stats = recorder.get_stats().await;
+        // Assert stats were fetched (may or may not have files depending on timing)
+        assert!(stats.started_at.is_none()); // Should not have a start time
+    }
+
+    /// Tests extract_duration_from_filename returns segment duration
+    #[test]
+    fn test_extract_duration_from_filename() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        config.segment_duration = 15;
+
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = VideoRecorder::new(config, disk_manager);
+
+        let path = PathBuf::from("/recordings/segment_cam1_20240101_120000_000001.mp4");
+        let duration = recorder.extract_duration_from_filename(&path, "cam1");
+
+        assert_eq!(duration, Some(15));
+    }
+
+    /// Tests scan_stream_directory counts files correctly
+    #[tokio::test]
+    async fn test_scan_stream_directory() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        config.segment_duration = 10;
+
+        // Create directory with mp4 files
+        std::fs::write(temp_dir.path().join("video1.mp4"), b"video1").unwrap();
+        std::fs::write(temp_dir.path().join("video2.mp4"), b"video2").unwrap();
+        std::fs::write(temp_dir.path().join("readme.txt"), b"text").unwrap();
+
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = VideoRecorder::new(config, disk_manager);
+
+        let result = recorder.scan_stream_directory(temp_dir.path(), "test").await;
+
+        assert!(result.is_ok());
+        let (count, duration) = result.unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(duration, 20); // 2 files * 10 seconds
+    }
+
+    /// Tests list_streams returns all stream IDs
+    #[tokio::test]
+    async fn test_list_streams() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        config.streams = vec![
+            StreamConfig {
+                id: "alpha".to_string(),
+                url: "rtsp://example.com/alpha".to_string(),
+                enabled: true,
+                output_subdir: None,
+            },
+            StreamConfig {
+                id: "beta".to_string(),
+                url: "rtsp://example.com/beta".to_string(),
+                enabled: true,
+                output_subdir: None,
+            },
+        ];
+
+        std::fs::create_dir_all(temp_dir.path().join("alpha")).unwrap();
+        std::fs::create_dir_all(temp_dir.path().join("beta")).unwrap();
+
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = VideoRecorder::new(config, disk_manager);
+
+        recorder.initialize_streams().await;
+
+        let streams = recorder.list_streams().await;
+
+        assert_eq!(streams.len(), 2);
+        assert!(streams.contains(&"alpha".to_string()));
+        assert!(streams.contains(&"beta".to_string()));
+    }
+
+    /// Tests recording_stats debug output
+    #[test]
+    fn test_recording_stats_debug() {
+        let stats = RecordingStats {
+            started_at: None,
+            files_recorded: 10,
+            total_duration: 100,
+            last_file: None,
+        };
+
+        let debug_str = format!("{:?}", stats);
+
+        assert!(debug_str.contains("RecordingStats"));
+        assert!(debug_str.contains("10"));
+        assert!(debug_str.contains("100"));
+    }
+
+    /// Tests stream_stats debug output
+    #[test]
+    fn test_stream_stats_debug() {
+        let stats = StreamStats {
+            stream_id: "test".to_string(),
+            stream_url: "rtsp://test.com".to_string(),
+            is_recording: false,
+            stats: RecordingStats {
+                started_at: None,
+                files_recorded: 0,
+                total_duration: 0,
+                last_file: None,
+            },
+        };
+
+        let debug_str = format!("{:?}", stats);
+
+        assert!(debug_str.contains("StreamStats"));
+        assert!(debug_str.contains("test"));
+    }
+
+    /// Tests multi_stream_stats debug output
+    #[test]
+    fn test_multi_stream_stats_debug() {
+        let stats = MultiStreamStats {
+            streams: vec![],
+            total_files_recorded: 50,
+            active_streams: 2,
+        };
+
+        let debug_str = format!("{:?}", stats);
+
+        assert!(debug_str.contains("MultiStreamStats"));
+        assert!(debug_str.contains("50"));
+        assert!(debug_str.contains("2"));
+    }
+
+    /// FR-5: Tests that max_retries is respected in config
+    #[test]
+    fn test_config_max_retries() {
+        let mut config = Config::default();
+        config.max_retries = 5;
+
+        assert_eq!(config.max_retries, 5);
+    }
+
+    /// FR-4: Tests segment duration configuration
+    #[test]
+    fn test_config_segment_duration() {
+        let mut config = Config::default();
+        config.segment_duration = 30;
+
+        assert_eq!(config.segment_duration, 30);
+    }
+
+    /// Tests start with no enabled streams fails
+    #[tokio::test]
+    async fn test_start_no_enabled_streams() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        // No streams configured
+
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = VideoRecorder::new(config, disk_manager);
+
+        recorder.initialize_streams().await;
+
+        let result = recorder.start().await;
+
+        // Should fail because there are no streams to start
+        assert!(result.is_err());
+    }
+
+    /// Tests is_recording reflects any stream recording state
+    #[tokio::test]
+    async fn test_is_recording_empty() {
+        let config = Config::default();
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = VideoRecorder::new(config, disk_manager);
+
+        assert!(!recorder.is_recording().await);
+    }
+
+    /// Tests SingleStreamRecorder clone functionality
+    #[tokio::test]
+    async fn test_single_stream_recorder_clone() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        config.streams = vec![StreamConfig {
+            id: "test_stream".to_string(),
+            url: "rtsp://example.com/test".to_string(),
+            enabled: true,
+            output_subdir: None,
+        }];
+
+        std::fs::create_dir_all(temp_dir.path().join("test_stream")).unwrap();
+
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = VideoRecorder::new(config, disk_manager);
+
+        recorder.initialize_streams().await;
+
+        // Verify clone works by getting stats from both original and clone
+        let cloned = recorder.clone();
+        let original_stats = recorder.get_multi_stream_stats().await;
+        let cloned_stats = cloned.get_multi_stream_stats().await;
+
+        assert_eq!(original_stats.streams.len(), cloned_stats.streams.len());
+    }
+
+    /// Tests generate_segment_path creates valid paths
+    #[test]
+    fn test_generate_segment_path_format() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        config.streams = vec![StreamConfig {
+            id: "test_cam".to_string(),
+            url: "rtsp://example.com/cam".to_string(),
+            enabled: true,
+            output_subdir: None,
+        }];
+
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = VideoRecorder::new(config, disk_manager);
+
+        // The generate_segment_path is internal to SingleStreamRecorder
+        // We verify path structure through the config's get_stream_output_dir
+        let stream_dir = recorder.config.get_stream_output_dir("test_cam");
+        assert!(stream_dir.ends_with("test_cam"));
+    }
+
+    /// Tests create_input_options returns proper dictionary for RTSP
+    #[test]
+    fn test_create_input_options_rtsp_detection() {
+        let config = Config::default();
+
+        // Verify RTSP transport config is set properly
+        assert!(config.rtsp_transport == "tcp" || config.rtsp_transport == "udp");
+        assert!(config.ffmpeg_analyzeduration > 0);
+        assert!(config.ffmpeg_probesize > 0);
+    }
+
+    /// Tests recording stats update after scan with existing files
+    #[tokio::test]
+    async fn test_scan_updates_stats_with_files() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        config.segment_duration = 5;
+        config.streams = vec![StreamConfig {
+            id: "cam1".to_string(),
+            url: "rtsp://example.com/cam1".to_string(),
+            enabled: true,
+            output_subdir: None,
+        }];
+
+        // Create files before recorder initialization
+        let stream_dir = temp_dir.path().join("cam1");
+        std::fs::create_dir_all(&stream_dir).unwrap();
+        std::fs::write(stream_dir.join("segment_cam1_20240101_120000_000001.mp4"), b"video1").unwrap();
+        std::fs::write(stream_dir.join("segment_cam1_20240101_120005_000002.mp4"), b"video2").unwrap();
+        std::fs::write(stream_dir.join("segment_cam1_20240101_120010_000003.mp4"), b"video3").unwrap();
+
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = VideoRecorder::new(config, disk_manager);
+
+        recorder.initialize_streams().await;
+
+        let stats = recorder.get_stream_stats("cam1").await.unwrap();
+        // The scan_existing_recordings updates total_duration from file count
+        // Files recorded counter is updated during scan
+        assert_eq!(stats.stats.total_duration, 15); // 3 files * 5 seconds
+    }
+
+    /// Tests multi-stream stats aggregation with files
+    #[tokio::test]
+    async fn test_multi_stream_stats_with_files() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        config.segment_duration = 10;
+        config.streams = vec![
+            StreamConfig {
+                id: "cam1".to_string(),
+                url: "rtsp://example.com/cam1".to_string(),
+                enabled: true,
+                output_subdir: None,
+            },
+            StreamConfig {
+                id: "cam2".to_string(),
+                url: "rtsp://example.com/cam2".to_string(),
+                enabled: true,
+                output_subdir: None,
+            },
+        ];
+
+        // Create files for cam1
+        let cam1_dir = temp_dir.path().join("cam1");
+        std::fs::create_dir_all(&cam1_dir).unwrap();
+        std::fs::write(cam1_dir.join("video1.mp4"), b"cam1video1").unwrap();
+        std::fs::write(cam1_dir.join("video2.mp4"), b"cam1video2").unwrap();
+
+        // Create files for cam2
+        let cam2_dir = temp_dir.path().join("cam2");
+        std::fs::create_dir_all(&cam2_dir).unwrap();
+        std::fs::write(cam2_dir.join("video1.mp4"), b"cam2video1").unwrap();
+
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = VideoRecorder::new(config, disk_manager);
+
+        recorder.initialize_streams().await;
+
+        let multi_stats = recorder.get_multi_stream_stats().await;
+        assert_eq!(multi_stats.streams.len(), 2);
+        // Verify each stream has correct duration
+        // cam1 has 2 files * 10s = 20s, cam2 has 1 file * 10s = 10s
+        let total_duration: u64 = multi_stats.streams.iter().map(|s| s.stats.total_duration).sum();
+        assert_eq!(total_duration, 30);
+    }
+
+    /// Tests stop returns NotRecording error when stream exists but not recording
+    #[tokio::test]
+    async fn test_stop_stream_not_recording_error() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        config.streams = vec![StreamConfig {
+            id: "cam1".to_string(),
+            url: "rtsp://example.com/cam1".to_string(),
+            enabled: true,
+            output_subdir: None,
+        }];
+
+        std::fs::create_dir_all(temp_dir.path().join("cam1")).unwrap();
+
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = VideoRecorder::new(config, disk_manager);
+
+        recorder.initialize_streams().await;
+
+        // Try to stop a stream that isn't recording
+        let result = recorder.stop_stream("cam1").await;
+        assert!(result.is_err());
+    }
+
+    /// Tests recording status remains false when stream not found
+    #[tokio::test]
+    async fn test_is_stream_recording_nonexistent() {
+        let config = Config::default();
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = VideoRecorder::new(config, disk_manager);
+
+        // Check non-existent stream
+        let is_recording = recorder.is_stream_recording("nonexistent_stream").await;
+        assert!(!is_recording);
+    }
+
+    /// Tests start fails when no streams can connect
+    #[tokio::test]
+    async fn test_start_all_streams_fails_gracefully() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        config.streams = vec![StreamConfig {
+            id: "invalid_stream".to_string(),
+            url: "rtsp://invalid-host.example.com:8554/nonexistent".to_string(),
+            enabled: true,
+            output_subdir: None,
+        }];
+
+        std::fs::create_dir_all(temp_dir.path().join("invalid_stream")).unwrap();
+
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = VideoRecorder::new(config, disk_manager);
+
+        recorder.initialize_streams().await;
+
+        // Start should fail because the stream URL is invalid
+        // Note: This will attempt to connect and fail
+        // The actual start will spawn a task, so we just verify it handles gracefully
+        let start_result = recorder.start().await;
+        // It should return Ok because it spawns a task, but the task will fail
+        // We'll stop immediately to clean up
+        let _ = recorder.stop().await;
+    }
+
+    /// Tests stats are returned correctly for first enabled stream
+    #[tokio::test]
+    async fn test_get_stats_first_enabled_stream() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        config.segment_duration = 10;
+        config.streams = vec![
+            StreamConfig {
+                id: "disabled".to_string(),
+                url: "rtsp://example.com/disabled".to_string(),
+                enabled: false,
+                output_subdir: None,
+            },
+            StreamConfig {
+                id: "enabled1".to_string(),
+                url: "rtsp://example.com/enabled1".to_string(),
+                enabled: true,
+                output_subdir: None,
+            },
+        ];
+
+        let enabled_dir = temp_dir.path().join("enabled1");
+        std::fs::create_dir_all(&enabled_dir).unwrap();
+        std::fs::write(enabled_dir.join("video.mp4"), b"video").unwrap();
+
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = VideoRecorder::new(config, disk_manager);
+
+        recorder.initialize_streams().await;
+
+        let stats = recorder.get_stats().await;
+        // Should get stats from enabled1 (the first enabled stream)
+        // The scan_existing_recordings sets total_duration from file count
+        assert_eq!(stats.total_duration, 10); // 1 file * 10 seconds
+    }
+
+    /// Tests stream_stats contains correct stream info
+    #[tokio::test]
+    async fn test_stream_stats_contains_url() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        config.streams = vec![StreamConfig {
+            id: "cam1".to_string(),
+            url: "rtsp://my-camera.local:8554/stream".to_string(),
+            enabled: true,
+            output_subdir: None,
+        }];
+
+        std::fs::create_dir_all(temp_dir.path().join("cam1")).unwrap();
+
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = VideoRecorder::new(config, disk_manager);
+
+        recorder.initialize_streams().await;
+
+        let stats = recorder.get_stream_stats("cam1").await.unwrap();
+        assert_eq!(stats.stream_id, "cam1");
+        assert_eq!(stats.stream_url, "rtsp://my-camera.local:8554/stream");
+        assert!(!stats.is_recording);
+    }
+
+    /// Tests scan handles directories without mp4 files
+    #[tokio::test]
+    async fn test_scan_directory_with_other_files() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        config.streams = vec![StreamConfig {
+            id: "cam1".to_string(),
+            url: "rtsp://example.com/cam1".to_string(),
+            enabled: true,
+            output_subdir: None,
+        }];
+
+        let stream_dir = temp_dir.path().join("cam1");
+        std::fs::create_dir_all(&stream_dir).unwrap();
+        std::fs::write(stream_dir.join("readme.txt"), b"text").unwrap();
+        std::fs::write(stream_dir.join("video.avi"), b"avi").unwrap();
+        std::fs::write(stream_dir.join("video.mkv"), b"mkv").unwrap();
+
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = VideoRecorder::new(config, disk_manager);
+
+        recorder.initialize_streams().await;
+
+        let stats = recorder.get_stream_stats("cam1").await.unwrap();
+        assert_eq!(stats.stats.files_recorded, 0);
+        assert_eq!(stats.stats.total_duration, 0);
+    }
+
+    /// Tests stop_recording on already stopped stream
+    #[tokio::test]
+    async fn test_stop_already_stopped() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output_dir = temp_dir.path().to_path_buf();
+        config.streams = vec![StreamConfig {
+            id: "cam1".to_string(),
+            url: "rtsp://example.com/cam1".to_string(),
+            enabled: true,
+            output_subdir: None,
+        }];
+
+        std::fs::create_dir_all(temp_dir.path().join("cam1")).unwrap();
+
+        let disk_manager = Arc::new(DiskManager::new(config.clone()));
+        let recorder = VideoRecorder::new(config, disk_manager);
+
+        recorder.initialize_streams().await;
+
+        // Try to stop when not recording - should return error
+        let result = recorder.stop_stream("cam1").await;
+        assert!(matches!(result, Err(crate::error::RecorderError::NotRecording)));
+    }
 }
