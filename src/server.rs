@@ -1,17 +1,17 @@
 use crate::config::Config;
 use crate::disk_manager::{DiskManager, StorageInfo};
-use crate::recorder::{Recorder, RecordingStats, StreamStats, MultiStreamStats};
+use crate::recorder::{MultiStreamStats, Recorder, RecordingStats, StreamStats};
 use axum::{
-    Router,
-    extract::{State, Path},
+    extract::{Path, State},
     http::StatusCode,
     response::Json,
     routing::{get, post},
+    Router,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tower::ServiceBuilder;
-use tower_http::{trace::TraceLayer, services::ServeDir};
+use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing::{error, info, trace};
 
 #[derive(Clone)]
@@ -50,6 +50,7 @@ pub struct StreamListResponse {
     pub streams: Vec<String>,
 }
 
+#[allow(dead_code)] // reserved request body for the start endpoint
 #[derive(Deserialize)]
 pub struct StartRequest {
     //pub force: Option<bool>,
@@ -119,14 +120,10 @@ impl Server {
 }
 
 async fn health_check(State(state): State<AppState>) -> Result<Json<HealthResponse>, StatusCode> {
-    let storage = state
-        .disk_manager
-        .get_storage_info()
-        .await
-        .map_err(|e| {
-            error!("Failed to get storage info for health check: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let storage = state.disk_manager.get_storage_info().await.map_err(|e| {
+        error!("Failed to get storage info for health check: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     let is_recording = state.recorder.is_recording().await;
 
@@ -152,14 +149,10 @@ async fn get_metrics(State(state): State<AppState>) -> Result<Json<MetricsRespon
     info!("Metrics requested");
 
     let recording_stats = state.recorder.get_stats().await;
-    let storage_info = state
-        .disk_manager
-        .get_storage_info()
-        .await
-        .map_err(|e| {
-            error!("Failed to get storage info for metrics: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let storage_info = state.disk_manager.get_storage_info().await.map_err(|e| {
+        error!("Failed to get storage info for metrics: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     let files_deleted = state.disk_manager.get_files_deleted();
     let last_cleanup = state
         .disk_manager
@@ -217,25 +210,25 @@ async fn stop_recording(State(state): State<AppState>) -> Result<String, StatusC
 
 // New multi-stream API endpoints
 
-async fn list_streams(State(state): State<AppState>) -> Result<Json<StreamListResponse>, StatusCode> {
+async fn list_streams(
+    State(state): State<AppState>,
+) -> Result<Json<StreamListResponse>, StatusCode> {
     info!("Received request to list streams");
 
     let streams = state.recorder.list_streams().await;
     Ok(Json(StreamListResponse { streams }))
 }
 
-async fn get_multi_stream_metrics(State(state): State<AppState>) -> Result<Json<MultiStreamMetricsResponse>, StatusCode> {
+async fn get_multi_stream_metrics(
+    State(state): State<AppState>,
+) -> Result<Json<MultiStreamMetricsResponse>, StatusCode> {
     info!("Multi-stream metrics requested");
 
     let multi_stream_stats = state.recorder.get_multi_stream_stats().await;
-    let storage_info = state
-        .disk_manager
-        .get_storage_info()
-        .await
-        .map_err(|e| {
-            error!("Failed to get storage info for multi-stream metrics: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let storage_info = state.disk_manager.get_storage_info().await.map_err(|e| {
+        error!("Failed to get storage info for multi-stream metrics: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     let files_deleted = state.disk_manager.get_files_deleted();
     let last_cleanup = state
         .disk_manager
@@ -257,7 +250,10 @@ async fn start_stream_recording(
     Path(stream_id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<String, StatusCode> {
-    info!("Received request to start recording for stream: {}", stream_id);
+    info!(
+        "Received request to start recording for stream: {}",
+        stream_id
+    );
 
     match state.recorder.start_stream(&stream_id).await {
         Ok(_) => {
@@ -275,7 +271,10 @@ async fn stop_stream_recording(
     Path(stream_id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<String, StatusCode> {
-    info!("Received request to stop recording for stream: {}", stream_id);
+    info!(
+        "Received request to stop recording for stream: {}",
+        stream_id
+    );
 
     match state.recorder.stop_stream(&stream_id).await {
         Ok(_) => {
