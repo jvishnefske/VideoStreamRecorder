@@ -52,7 +52,10 @@ mod tests {
     #[test]
     fn test_stream_connection_error_display() {
         let error = RecorderError::StreamConnection("Connection refused".to_string());
-        assert_eq!(error.to_string(), "Stream connection failed: Connection refused");
+        assert_eq!(
+            error.to_string(),
+            "Stream connection failed: Connection refused"
+        );
     }
 
     #[test]

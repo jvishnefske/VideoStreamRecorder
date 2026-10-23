@@ -12,7 +12,10 @@ pub struct StreamStorageInfo {
 
 impl DiskManager {
     /// Get storage info for a specific stream directory
-    pub async fn get_stream_storage_info(&self, stream_id: &str) -> Result<Option<StreamStorageInfo>> {
+    pub async fn get_stream_storage_info(
+        &self,
+        stream_id: &str,
+    ) -> Result<Option<StreamStorageInfo>> {
         let stream_dir = self.get_config().get_stream_output_dir(stream_id);
 
         if !stream_dir.exists() {

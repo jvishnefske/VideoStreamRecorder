@@ -3,8 +3,8 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use fs2::available_space;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
@@ -69,7 +69,8 @@ impl DiskManager {
         let mut files = Vec::new();
 
         // Add files from main output directory
-        self.collect_mp4_files(&self.config.output_dir, &mut files).await?;
+        self.collect_mp4_files(&self.config.output_dir, &mut files)
+            .await?;
 
         // Add files from each stream's output directory
         for stream in &self.config.streams {
@@ -84,7 +85,10 @@ impl DiskManager {
         // Sort by creation time (oldest first)
         files.sort_by_key(|(_, created, _)| *created);
 
-        info!("Found {} video files across all directories for potential cleanup", files.len());
+        info!(
+            "Found {} video files across all directories for potential cleanup",
+            files.len()
+        );
 
         // Delete oldest files until we have enough space
         for (file_path, _, size) in files {
@@ -114,7 +118,11 @@ impl DiskManager {
         Ok(deleted_size)
     }
 
-    async fn collect_mp4_files(&self, dir: &Path, files: &mut Vec<(std::path::PathBuf, std::time::SystemTime, u64)>) -> Result<()> {
+    async fn collect_mp4_files(
+        &self,
+        dir: &Path,
+        files: &mut Vec<(std::path::PathBuf, std::time::SystemTime, u64)>,
+    ) -> Result<()> {
         let mut entries = tokio::fs::read_dir(dir).await?;
 
         while let Some(entry) = entries.next_entry().await? {
@@ -184,6 +192,7 @@ impl DiskManager {
     }
 
     /// Get the configuration for use in extension modules
+    #[allow(dead_code)] // currently only exercised by tests
     pub fn get_config(&self) -> &Config {
         &self.config
     }
@@ -249,7 +258,10 @@ mod tests {
         let manager = DiskManager::new(config.clone());
 
         assert_eq!(manager.get_files_deleted(), 0);
-        assert_eq!(manager.get_config().segment_duration, config.segment_duration);
+        assert_eq!(
+            manager.get_config().segment_duration,
+            config.segment_duration
+        );
     }
 
     #[test]
@@ -276,9 +288,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_disk_manager_get_config() {
-        let mut config = Config::default();
-        config.segment_duration = 42;
-        config.max_disk_usage_percent = 75.0;
+        let config = Config {
+            segment_duration: 42,
+            max_disk_usage_percent: 75.0,
+            ..Default::default()
+        };
 
         let manager = DiskManager::new(config);
 

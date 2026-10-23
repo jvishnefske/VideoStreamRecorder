@@ -115,7 +115,9 @@ fn get_dir_last_modified(dir: &Path) -> std::time::SystemTime {
             let modified = if path.is_dir() {
                 get_dir_last_modified(&path)
             } else {
-                fs::metadata(&path).map(|m| m.modified().unwrap_or(std::time::UNIX_EPOCH)).unwrap_or(std::time::UNIX_EPOCH)
+                fs::metadata(&path)
+                    .map(|m| m.modified().unwrap_or(std::time::UNIX_EPOCH))
+                    .unwrap_or(std::time::UNIX_EPOCH)
             };
 
             if modified > latest {
